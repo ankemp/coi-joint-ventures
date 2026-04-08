@@ -23,6 +23,8 @@ internal sealed class MultiplayerSession : IDisposable
     private readonly HashSet<string> _pendingPeers = new();
     private readonly Dictionary<string, string> _peerNames = new();
     private readonly Dictionary<long, int> _pendingHostChecksums = new();
+    private readonly HashSet<string> _observedCommands = new(StringComparer.OrdinalIgnoreCase);
+    private bool _simulateDropNextPacket;
 
     public bool HasDesynced { get; private set; }
     private readonly HashSet<Guid> _outboundCommandIds = new();
@@ -773,6 +775,21 @@ internal sealed class MultiplayerSession : IDisposable
         {
             msg.SenderPeerId = senderPeerId;
             msg.SenderName = ResolvePeerName(senderPeerId);
+
+            if (msg.Kind == 0 && msg.Text.Trim().Equals("/ping", StringComparison.OrdinalIgnoreCase))
+            {
+                var pong = new ChatMessagePayload
+                {
+                    SenderName = "Server",
+                    SenderPeerId = HostPeerId,
+                    Kind = 3, // System
+                    Text = "pong"
+                };
+                _transport.SendToClient(senderPeerId, ProtocolCodec.WrapChatMessage(pong));
+                _log.LogInfo($"[PING] Received ping from '{senderPeerId}', replied with pong.");
+                return;
+            }
+
             _transport.Broadcast(ProtocolCodec.WrapChatMessage(msg));
         }
 
@@ -789,6 +806,10 @@ internal sealed class MultiplayerSession : IDisposable
         else if (msg.Kind == 2)
         {
             PluginRuntime.Chat.AddSimControl(msg.SenderName, msg.Text);
+        }
+        else if (msg.Kind == 3)
+        {
+            PluginRuntime.Chat.AddSystem(msg.Text);
         }
         else
         {
@@ -932,6 +953,42 @@ internal sealed class MultiplayerSession : IDisposable
             return;
         }
 
+        if (WasCommand(text, "/help"))
+        {
+            var commands = _observedCommands.Count > 0
+                ? string.Join(", ", _observedCommands)
+                : "No commands tracked yet.";
+            PluginRuntime.Chat.AddSystem($"Known commands: {commands}");
+            return;
+        }
+
+        if (WasCommand(text, "/hiccup"))
+        {
+            ActivateDebugPacketDrop();
+            return;
+        }
+
+        if (WasCommand(text, "/ping"))
+        {
+            if (Mode == MultiplayerMode.Host)
+            {
+                PluginRuntime.Chat.AddSystem("pong");
+                return;
+            }
+
+            var pingMsg = new ChatMessagePayload
+            {
+                SenderName = LocalPlayerName,
+                SenderPeerId = LocalPeerId,
+                Kind = 0,
+                Text = text
+            };
+
+            _transport.SendToHost(ProtocolCodec.WrapChatMessage(pingMsg));
+            PluginRuntime.Chat.AddSystem("Ping sent to server.");
+            return;
+        }
+
         var msg = new ChatMessagePayload
         {
             SenderName = LocalPlayerName,
@@ -951,6 +1008,36 @@ internal sealed class MultiplayerSession : IDisposable
         }
 
         PluginRuntime.Chat.AddChat(LocalPlayerName, text);
+    }
+
+    public bool WasCommand(string text, string command)
+    {
+        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(command))
+        {
+            return false;
+        }
+
+        var trimmed = text.Trim();
+        var normalized = command.StartsWith("/") ? command : "/" + command;
+        if (!trimmed.StartsWith(normalized, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (trimmed.Length == normalized.Length || char.IsWhiteSpace(trimmed[normalized.Length]))
+        {
+            _observedCommands.Add(normalized);
+            return true;
+        }
+
+        return false;
+    }
+
+    public void ActivateDebugPacketDrop()
+    {
+        _simulateDropNextPacket = true;
+        PluginRuntime.Chat.AddSystem("HICCUP ACTIVE: The next host command will be silently dropped to force a desync.");
+        _log.LogWarning("[DEBUG] Client activated /hiccup command.");
     }
 
     public void SendActionLog(string description)
@@ -1070,6 +1157,14 @@ internal sealed class MultiplayerSession : IDisposable
                 {
                     _pendingCommands.Dequeue();
                 }
+                return;
+            }
+
+            if (_simulateDropNextPacket)
+            {
+                _simulateDropNextPacket = false;
+                _log.LogError($"[DEBUG] Silently dropping host command '{envelope.CommandType}' (seq {envelope.Sequence}) to simulate network loss!");
+                PluginRuntime.Chat.AddSystem($"Dropped packet: seq {envelope.Sequence}");
                 return;
             }
 
