@@ -34,6 +34,7 @@ public sealed class Plugin : BaseUnityPlugin
     private MainPanelUI? _mainPanel;
     private ChatPanelUI? _chatPanel;
     private JoinOverlayUI? _joinOverlay;
+    private DesyncIndicatorUI? _desyncIndicator;
 
 
 
@@ -138,6 +139,9 @@ public sealed class Plugin : BaseUnityPlugin
         _chatPanel = new ChatPanelUI();
         _uiManager.AddElement(_chatPanel.Root);
 
+        _desyncIndicator = new DesyncIndicatorUI();
+        _uiManager.AddElement(_desyncIndicator.Root);
+
         // join overlay (full screen blocking)
         _joinOverlay = new JoinOverlayUI();
         _uiManager.AddElement(_joinOverlay.Root);
@@ -225,6 +229,11 @@ public sealed class Plugin : BaseUnityPlugin
         if (_mainPanel != null)
         {
             _mainPanel.LobbyCode = _bootstrap?.LobbyCode;
+        }
+
+        if (_desyncIndicator != null && _bootstrap != null)
+        {
+            _desyncIndicator.IsDesynced = _bootstrap.Session.HasDesynced;
         }
     }
 

@@ -22,6 +22,9 @@ internal sealed class MultiplayerSession : IDisposable
     private readonly HashSet<string> _activePeers = new();
     private readonly HashSet<string> _pendingPeers = new();
     private readonly Dictionary<string, string> _peerNames = new();
+    private readonly Dictionary<long, int> _pendingHostChecksums = new();
+
+    public bool HasDesynced { get; private set; }
     private readonly HashSet<Guid> _outboundCommandIds = new();
     private readonly HashSet<Guid> _seenCommandIds = new();
     private readonly Dictionary<string, int> _peerColors = new();
@@ -125,6 +128,8 @@ internal sealed class MultiplayerSession : IDisposable
     public void StartAsHost(string peerId, ServerConfig config, SaveFileManager saveManager, string? currentSavePath)
     {
         _pendingCommands.Clear();
+        _pendingHostChecksums.Clear();
+        HasDesynced = false;
         _serverConfig = config;
         _saveManager = saveManager;
         _currentSavePath = currentSavePath;
@@ -165,6 +170,8 @@ internal sealed class MultiplayerSession : IDisposable
     public void StartAsClient(string localPeerId, string hostPeerId, string playerName, string password)
     {
         _pendingCommands.Clear();
+        _pendingHostChecksums.Clear();
+        HasDesynced = false;
         LocalPeerId = localPeerId;
         HostPeerId = hostPeerId;
         LocalPlayerName = playerName;
@@ -213,6 +220,17 @@ internal sealed class MultiplayerSession : IDisposable
         if (Mode == MultiplayerMode.Host)
         {
             ApplyAsHost(envelope, apply);
+
+            if (envelope.Sequence % 50 == 0)
+            {
+                var checksumPayload = new StateChecksumPayload
+                {
+                    Sequence = envelope.Sequence,
+                    Checksum = CalculateLocalChecksum()
+                };
+                _transport.Broadcast(ProtocolCodec.WrapStateChecksum(checksumPayload));
+            }
+
             return;
         }
 
@@ -306,6 +324,8 @@ internal sealed class MultiplayerSession : IDisposable
         HostDisconnected = false;
         IsJoinSyncActive = false;
         JoinSyncPlayerName = string.Empty;
+        _pendingHostChecksums.Clear();
+        HasDesynced = false;
         _pendingCommands.Clear();
         lock (_activePeers) { _activePeers.Clear(); }
         lock (_pendingPeers) { _pendingPeers.Clear(); }
@@ -378,6 +398,9 @@ internal sealed class MultiplayerSession : IDisposable
                 break;
             case ProtocolMessageType.ChatMessage:
                 HandleChatMessage(message.SenderPeerId, payload);
+                break;
+            case ProtocolMessageType.StateChecksum:
+                HandleStateChecksum(payload);
                 break;
             case ProtocolMessageType.GameCommand:
                 HandleGameCommand(message.SenderPeerId, payload);
@@ -1052,10 +1075,71 @@ internal sealed class MultiplayerSession : IDisposable
 
             _log.LogInfo($"[GAME-CMD] CLIENT: Received host command '{envelope.CommandType}' seq={envelope.Sequence} -> reinject.");
             ReceiveReplicatedCommand(envelope);
+
+            if (_pendingHostChecksums.TryGetValue(envelope.Sequence, out var hostChecksum))
+            {
+                _pendingHostChecksums.Remove(envelope.Sequence);
+                var localChecksum = CalculateLocalChecksum();
+                if (localChecksum != hostChecksum)
+                {
+                    _log.LogError($"[DESYNC] Sequence {envelope.Sequence}: Host Hash={hostChecksum}, Local Hash={localChecksum}");
+                    HasDesynced = true;
+                }
+            }
+
             return;
         }
 
         _log.LogWarning($"[GAME-CMD] UNHANDLED: sender='{senderPeerId}', mode={Mode}, hostPeer='{HostPeerId}' — command dropped!");
+    }
+
+    private void HandleStateChecksum(byte[] payload)
+    {
+        if (Mode != MultiplayerMode.Client)
+        {
+            return;
+        }
+
+        var checksumData = ProtocolCodec.DecodeStateChecksum(payload);
+        _pendingHostChecksums[checksumData.Sequence] = checksumData.Checksum;
+    }
+
+    private int CalculateLocalChecksum()
+    {
+        var scheduler = PluginRuntime.Scheduler;
+        if (scheduler == null)
+        {
+            return 0;
+        }
+
+        // Basic state fingerprint using scheduler queue counts and pending replicated work.
+        // TODO: Replace with a more meaningful model-specific hash of simulation state.
+        var hash = 17;
+        var fields = typeof(Mafi.Core.Input.InputScheduler).GetFields(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        foreach (var field in fields)
+        {
+            try
+            {
+                var value = field.GetValue(scheduler);
+                if (value is System.Collections.ICollection collection)
+                {
+                    hash = hash * 31 + collection.Count;
+                }
+                else if (value is System.Collections.IEnumerable enumerable)
+                {
+                    var count = 0;
+                    foreach (var _ in enumerable) count++;
+                    hash = hash * 31 + count;
+                }
+            }
+            catch
+            {
+                // ignore reflection failures
+            }
+        }
+
+        hash = hash * 31 + PluginRuntime.PendingReplicatedCount;
+        return hash;
     }
 
     // fired when someone drops — could be a client (if we're host) or the host (if we're client)

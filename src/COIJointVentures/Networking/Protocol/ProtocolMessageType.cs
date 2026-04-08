@@ -3,6 +3,7 @@ namespace COIJointVentures.Networking.Protocol;
 internal enum ProtocolMessageType : byte
 {
     GameCommand = 0x10,
+    StateChecksum = 0x15,
     JoinRequest = 0x01,
     JoinAccepted = 0x02,
     JoinRejected = 0x03,

@@ -11,6 +11,16 @@ internal static class ProtocolCodec
         return Wrap(ProtocolMessageType.GameCommand, commandPayload);
     }
 
+    public static byte[] WrapStateChecksum(StateChecksumPayload payload)
+    {
+        return Wrap(ProtocolMessageType.StateChecksum, SerializeJson(payload));
+    }
+
+    public static StateChecksumPayload DecodeStateChecksum(byte[] payload)
+    {
+        return DeserializeJson<StateChecksumPayload>(payload);
+    }
+
     public static byte[] WrapJoinRequest(JoinRequest request)
     {
         return Wrap(ProtocolMessageType.JoinRequest, SerializeJson(request));
