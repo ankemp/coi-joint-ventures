@@ -15,7 +15,9 @@ One player hosts their current save, and friends connect via Steam (or LAN). The
 - **Join by lobby code** - share a code with friends who can paste it to connect
 - **Save sync** - when someone joins, the game pauses for everyone, the host creates a fresh save, and transfers it to the joining player automatically
 - **Command replication** - most gameplay commands are synced between players (building, research, speed controls, vehicle assignments, fleet management, terrain, etc.)
+- **Desync detection & recovery** - sequence gap detection catches dropped packets and automatically requests the missed commands from the host (minor resync). State checksums detect simulation divergence and trigger a full save resync (major resync), using the same save-transfer flow as the initial join.
 - **In-game chat** - F9 opens a chat panel with player messages and an activity feed showing what everyone is doing (e.g. "Ryan placed Storage Fluid T2")
+- **Chat commands** - slash commands are now supported: `/help` shows available chat commands, `/ping` measures host latency, and `/hiccup` drops the next host command to simulate a desync.
 - **Session management** - if the host exits to menu, all clients are disconnected and sent back to menu. Clients can't load saves while connected.
 
 ### What hasn't really been tested
@@ -27,7 +29,6 @@ One player hosts their current save, and friends connect via Steam (or LAN). The
 ### What doesn't work (yet)
 
 - Some commands don't replicate correctly across all players
-- No desync detection or recovery yet - if the game states diverge, you'll need to rejoin
 - Camera and UI-only state aren't synced (each player has their own view)
 - This is very much alpha - expect rough edges
 
@@ -124,6 +125,6 @@ You'll need COI installed. Update `CaptainOfIndustryDir` in the `.csproj` if you
 - **Mod doesn't load** - make sure you have BepInEx 5.x (not 6.x) installed correctly. Check `BepInEx/LogOutput.log` for errors.
 - **Can't connect** - both players need the mod installed. Make sure Steam is running for Steam connections.
 - **Game crashes** - check the log, remove the mod, and see if the crash reproduces without it. If it only happens with the mod, that's on us, not COI.
-- **Things look out of sync** - rejoin. Desync recovery isn't implemented yet.
+- **Things look out of sync** - the mod will attempt to recover automatically. Watch the chat log for "Catching up" or "Packet loss recovered" messages. If a full resync is triggered you'll see the join overlay reappear briefly while the host re-transfers the save. If it gets stuck, rejoin manually.
 - **Host button is grayed out** - you need to be in a save to host. Load a save first.
 - **Join button is grayed out** - you need to be on the main menu to join. Exit your current save first.
