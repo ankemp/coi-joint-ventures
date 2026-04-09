@@ -49,17 +49,20 @@ public sealed class Plugin : BaseUnityPlugin
         try
         {
             LogInstance = Logger;
+            Logger.LogInfo($"COI: Joint Ventures {VersionConst.Full} initializing.");
 
             _bootstrap = new MultiplayerBootstrap(Logger);
             _bootstrap.Initialize();
             var pluginDirectory = Path.Combine(Paths.PluginPath, "COIJointVentures");
             var observedLogPath = Path.Combine(pluginDirectory, "observed-commands.log");
             var replicatedLogPath = Path.Combine(pluginDirectory, "replicated-commands.log");
+            var chatLogPath = Path.Combine(pluginDirectory, "chat.log");
             PluginRuntime.Initialize(
                 Logger,
                 _bootstrap.Session,
                 new RuntimeCommandLog(Logger, observedLogPath),
                 new RuntimeReplicationLog(Logger, replicatedLogPath),
+                new RuntimeChatLog(Logger, chatLogPath),
                 new NativeCommandCodec(),
                 _bootstrap.SaveManager);
 

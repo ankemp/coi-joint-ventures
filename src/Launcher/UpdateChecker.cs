@@ -12,8 +12,20 @@ internal static class UpdateChecker
     public static readonly string ReleasesPage =
         $"https://github.com/{GitHubRepo}/releases/latest";
 
-    public static string CurrentVersion =>
-        Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.0.0";
+    public static string CurrentVersion
+    {
+        get
+        {
+            var assembly = Assembly.GetExecutingAssembly();
+            var informationalVersion = assembly
+                .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
+                .InformationalVersion;
+            if (!string.IsNullOrWhiteSpace(informationalVersion))
+                return informationalVersion;
+
+            return assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+        }
+    }
 
     /// <summary>
     /// Checks GitHub for a newer release. Returns the tag name if an update
@@ -39,7 +51,12 @@ internal static class UpdateChecker
             if (!Version.TryParse(remoteVersionStr, out var remoteVersion))
                 return null;
 
-            if (!Version.TryParse(CurrentVersion, out var localVersion))
+            // CurrentVersion may include "+githash" suffix — strip it before parsing
+            var localVersionStr = CurrentVersion;
+            var plusIdx = localVersionStr.IndexOf('+');
+            if (plusIdx >= 0) localVersionStr = localVersionStr[..plusIdx];
+
+            if (!Version.TryParse(localVersionStr, out var localVersion))
                 return null;
 
             return remoteVersion > localVersion ? tagName : null;

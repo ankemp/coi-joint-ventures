@@ -74,12 +74,21 @@
     </Reference>
   </ItemGroup>
 
-  <!-- Generate a const so BepInPlugin attribute can use Version.props value -->
-  <Target Name="GenerateVersionConst" BeforeTargets="CoreCompile">
+  <!-- Generate a const so BepInPlugin attribute can use Version.props value, and embed git commit hash -->
+  <Target Name="GenerateVersionConst" BeforeTargets="GenerateAssemblyInfo;CoreCompile">
     <PropertyGroup>
       <VersionConstFile>$(IntermediateOutputPath)VersionConst.g.cs</VersionConstFile>
     </PropertyGroup>
-    <WriteLinesToFile File="$(VersionConstFile)" Overwrite="true" Lines="namespace COIJointVentures%3B%0Ainternal static class VersionConst { public const string Value = &quot;$(JointVenturesVersion)&quot;%3B }" />
+    <Exec Command="git rev-parse --short HEAD" ConsoleToMSBuild="true" IgnoreExitCode="true" StandardOutputImportance="Low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_GitCommitRaw" />
+    </Exec>
+    <PropertyGroup>
+      <GitCommitShort>$([System.String]::Copy($(_GitCommitRaw)).Trim())</GitCommitShort>
+      <GitCommitShort Condition="'$(GitCommitShort)' == ''">unknown</GitCommitShort>
+      <!-- Only append the git commit hash for local builds. -->
+      <SourceRevisionId Condition="'$(AppendSourceRevisionId)' == 'true'">$(GitCommitShort)</SourceRevisionId>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(VersionConstFile)" Overwrite="true" Lines="namespace COIJointVentures%3B%0Ainternal static class VersionConst { public const string Value = &quot;$(JointVenturesVersion)&quot;%3B public const string GitCommit = &quot;$(GitCommitShort)&quot;%3B public const string Full = &quot;$(JointVenturesVersion)+$(GitCommitShort)&quot;%3B }" />
     <ItemGroup>
       <Compile Include="$(VersionConstFile)" />
     </ItemGroup>

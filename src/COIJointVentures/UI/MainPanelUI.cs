@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using COIJointVentures;
 using COIJointVentures.Integration;
 using COIJointVentures.Runtime;
 using COIJointVentures.Session;
@@ -138,8 +139,14 @@ internal sealed class MainPanelUI
         footer.style.fontSize = 10;
         footer.style.color = new Color(0.4f, 0.4f, 0.4f);
         footer.style.paddingLeft = 12;
-        footer.style.paddingBottom = 6;
         _root.Add(footer);
+
+        var versionLabel = new Label($"v{VersionConst.Full}");
+        versionLabel.style.fontSize = 9;
+        versionLabel.style.color = new Color(0.28f, 0.28f, 0.28f);
+        versionLabel.style.paddingLeft = 12;
+        versionLabel.style.paddingBottom = 6;
+        _root.Add(versionLabel);
     }
 
     public void Update()

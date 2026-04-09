@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 
 namespace JointVentures.Launcher;
 
@@ -28,13 +29,14 @@ internal static class Program
         try
         {
             // ── Version + update check (non-blocking) ──
-            window.Log($"Joint Ventures v{UpdateChecker.CurrentVersion}");
+            window.Log($"Launcher version: {UpdateChecker.CurrentVersion}");
             var updateTask = UpdateChecker.CheckForUpdateAsync();
 
             // ── Download BepInEx if not cached (may wipe BepInEx/ dir) ──
             var cacheDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "JointVentures");
+            window.SetBepInExLogPath(Path.Combine(cacheDir, "BepInEx", "LogOutput.log"));
             var bepinexOk = BepInExDownloader.EnsureDownloadedAsync(cacheDir, window.Log).GetAwaiter().GetResult();
             if (!bepinexOk)
             {
@@ -46,6 +48,7 @@ internal static class Program
             window.Log("Extracting plugin...");
             BundleExtractor.EnsureExtracted();
             window.Log("Plugin ready.");
+            window.Log($"Mod version: {GetPluginVersion(Path.Combine(cacheDir, "BepInEx", "plugins", "COIJointVentures", "COIJointVentures.dll"))}");
 
             // Show update result if ready
             CheckUpdateResult(window, updateTask);
@@ -189,6 +192,29 @@ internal static class Program
         }
 
         return null;
+    }
+
+    private static string GetPluginVersion(string pluginDllPath)
+    {
+        try
+        {
+            var fileInfo = FileVersionInfo.GetVersionInfo(pluginDllPath);
+            if (!string.IsNullOrWhiteSpace(fileInfo.ProductVersion))
+                return fileInfo.ProductVersion;
+            if (!string.IsNullOrWhiteSpace(fileInfo.FileVersion))
+                return fileInfo.FileVersion;
+        }
+        catch { }
+
+        try
+        {
+            var assemblyName = AssemblyName.GetAssemblyName(pluginDllPath);
+            if (assemblyName.Version != null)
+                return assemblyName.Version.ToString(3);
+        }
+        catch { }
+
+        return "unknown";
     }
 
     private static void WaitForProcessExit(int pid)

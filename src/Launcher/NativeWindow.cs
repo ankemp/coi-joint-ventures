@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 
 namespace JointVentures.Launcher;
@@ -28,20 +30,21 @@ internal sealed class NativeWindow : IDisposable
     private const int WM_SETFONT = 0x0030;
     private const int WM_SETTEXT = 0x000C;
     private const int WM_CLOSE = 0x0010;
+    private const int WM_SYSCOMMAND = 0x0112;
     private const int EM_SETSEL = 0x00B1;
     private const int EM_REPLACESEL = 0x00C2;
     private const int EM_SCROLLCARET = 0x00B7;
 
     private const int WM_APP_LOG = 0x0401; // WM_APP + 1
+    private const int IDM_OPEN_BEPINEX_LOGS = 0x1000;
+    private const int IDM_OPEN_BEPINEX_LOG_DIRECTORY = 0x1001;
+    private const int MF_BYCOMMAND = 0x0000;
+    private const uint MF_SEPARATOR = 0x0800;
+    private const uint MF_STRING = 0x0000;
 
     private const int CW_USEDEFAULT = unchecked((int)0x80000000);
 
     private const int SC_CLOSE = 0xF060;
-    private const int MF_BYCOMMAND = 0x0000;
-
-    // ── P/Invoke ──
-
-    private delegate nint WndProcDelegate(nint hWnd, uint msg, nint wParam, nint lParam);
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WNDCLASSEXW
@@ -114,6 +117,9 @@ internal sealed class NativeWindow : IDisposable
     [DllImport("user32.dll")]
     private static extern bool DeleteMenu(nint hMenu, int nPosition, int nFlags);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool AppendMenuW(nint hMenu, uint uFlags, nint uIDNewItem, string lpNewItem);
+
     [DllImport("user32.dll")]
     private static extern nint LoadCursorW(nint hInstance, int lpCursorName);
 
@@ -129,6 +135,8 @@ internal sealed class NativeWindow : IDisposable
 
     [DllImport("kernel32.dll")]
     private static extern nint GetModuleHandleW(nint lpModuleName);
+
+    private delegate nint WndProcDelegate(nint hWnd, uint msg, nint wParam, nint lParam);
 
     // ── State ──
 
@@ -173,7 +181,12 @@ internal sealed class NativeWindow : IDisposable
         // Remove close button from system menu
         var hMenu = GetSystemMenu(_hWnd, false);
         if (hMenu != 0)
+        {
             DeleteMenu(hMenu, SC_CLOSE, MF_BYCOMMAND);
+            AppendMenuW(hMenu, MF_SEPARATOR, 0, string.Empty);
+            AppendMenuW(hMenu, MF_STRING, (nint)IDM_OPEN_BEPINEX_LOGS, "Open BepInEx logs");
+            AppendMenuW(hMenu, MF_STRING, (nint)IDM_OPEN_BEPINEX_LOG_DIRECTORY, "Open BepInEx log directory");
+        }
 
         // Create edit control (log area)
         var editClass = Marshal.StringToHGlobalUni("EDIT\0");
@@ -243,6 +256,14 @@ internal sealed class NativeWindow : IDisposable
                 FlushPendingLines();
                 return 0;
 
+            case WM_SYSCOMMAND when wParam == (nint)IDM_OPEN_BEPINEX_LOGS:
+                OpenBepInExLogs();
+                return 0;
+
+            case WM_SYSCOMMAND when wParam == (nint)IDM_OPEN_BEPINEX_LOG_DIRECTORY:
+                OpenBepInExLogDirectory();
+                return 0;
+
             case WM_CLOSE:
                 // Allow close — called by our code when cleanup is done
                 PostQuitMessage(0);
@@ -254,6 +275,77 @@ internal sealed class NativeWindow : IDisposable
 
             default:
                 return DefWindowProcW(hWnd, msg, wParam, lParam);
+        }
+    }
+
+    private string? _bepInExLogPath;
+
+    public void SetBepInExLogPath(string logPath)
+    {
+        _bepInExLogPath = logPath;
+    }
+
+    private void OpenBepInExLogs()
+    {
+        if (_bepInExLogPath is null)
+        {
+            Log("BepInEx log location not configured.");
+            return;
+        }
+
+        try
+        {
+            if (File.Exists(_bepInExLogPath))
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = _bepInExLogPath,
+                    UseShellExecute = true
+                });
+                return;
+            }
+
+            OpenBepInExLogDirectory();
+        }
+        catch (Exception ex)
+        {
+            Log($"Unable to open BepInEx logs: {ex.Message}");
+        }
+    }
+
+    private void OpenBepInExLogDirectory()
+    {
+        if (_bepInExLogPath is null)
+        {
+            Log("BepInEx log location not configured.");
+            return;
+        }
+
+        var logFolder = Path.GetDirectoryName(_bepInExLogPath);
+        if (string.IsNullOrEmpty(logFolder))
+        {
+            Log("BepInEx log directory not available.");
+            return;
+        }
+
+        try
+        {
+            if (Directory.Exists(logFolder))
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = logFolder,
+                    UseShellExecute = true
+                });
+            }
+            else
+            {
+                Log($"BepInEx log directory not found: {logFolder}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"Unable to open BepInEx log directory: {ex.Message}");
         }
     }
 

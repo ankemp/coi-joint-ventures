@@ -9,7 +9,8 @@
 
 param(
     [string]$Configuration = "Release",
-    [string]$OutputDir = "$PSScriptRoot\dist"
+    [string]$OutputDir = "$PSScriptRoot\dist",
+    [switch]$Local
 )
 
 $ErrorActionPreference = "Stop"
@@ -61,9 +62,19 @@ if (-not (Test-Path (Join-Path $coreDir "BepInEx.dll"))) {
 }
 
 # ── Build the plugin ──
-Write-Host "Building COIJointVentures plugin..." -ForegroundColor Yellow
 $pluginProj = Join-Path $RepoRoot "src\COIJointVentures\COIJointVentures.csproj"
-dotnet build $pluginProj -c $Configuration
+$buildProperties = @()
+if ($Local) {
+    $buildProperties += "-p:VersionSuffix=LOCAL"
+    $buildProperties += "-p:AppendSourceRevisionId=true"
+    Write-Host "Local build enabled: applying LOCAL version suffix and git commit metadata." -ForegroundColor Yellow
+}
+else {
+    Write-Host "Standard build: using release version metadata only." -ForegroundColor Yellow
+}
+$pluginBuildArgs = @("build", $pluginProj, "-c", $Configuration) + $buildProperties
+Write-Host "Building COIJointVentures plugin..." -ForegroundColor Yellow
+& dotnet @pluginBuildArgs
 if ($LASTEXITCODE -ne 0) { throw "Plugin build failed" }
 
 $pluginBinDir = Join-Path $RepoRoot "src\COIJointVentures\bin\$Configuration\net472"
@@ -94,14 +105,22 @@ Write-Host "Publishing launcher..." -ForegroundColor Yellow
 if (Test-Path $OutputDir) { Remove-Item $OutputDir -Recurse -Force }
 
 $launcherProj = Join-Path $LauncherDir "Launcher.csproj"
-dotnet publish $launcherProj `
-    -c $Configuration `
-    -r win-x64 `
-    --self-contained true `
-    -p:PublishSingleFile=true `
-    -p:PublishTrimmed=true `
-    -p:IncludeNativeLibrariesForSelfExtract=true `
-    -o $OutputDir
+$launcherPublishArgs = @(
+    "publish",
+    $launcherProj,
+    "-c", $Configuration,
+    "-r", "win-x64",
+    "--self-contained", "true",
+    "-p:PublishSingleFile=true",
+    "-p:PublishTrimmed=true",
+    "-p:IncludeNativeLibrariesForSelfExtract=true",
+    "-o", $OutputDir
+)
+if ($Local) {
+    $launcherPublishArgs += "-p:VersionSuffix=LOCAL"
+    $launcherPublishArgs += "-p:AppendSourceRevisionId=true"
+}
+& dotnet @launcherPublishArgs
 if ($LASTEXITCODE -ne 0) { throw "Launcher publish failed" }
 
 # Remove PDB from output

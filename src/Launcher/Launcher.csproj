@@ -20,4 +20,17 @@
     <!-- Embedded BepInEx bundle — created by build-release.ps1 -->
     <EmbeddedResource Include="plugin-bundle.zip" LogicalName="plugin-bundle.zip" Condition="Exists('plugin-bundle.zip')" />
   </ItemGroup>
+
+  <!-- Embed git commit hash into AssemblyInformationalVersion (e.g. "0.3.6+abc1234") -->
+  <Target Name="SetSourceRevisionId" BeforeTargets="GenerateAssemblyInfo">
+    <Exec Command="git rev-parse --short HEAD" ConsoleToMSBuild="true" IgnoreExitCode="true" StandardOutputImportance="Low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_LauncherGitRaw" />
+    </Exec>
+    <PropertyGroup>
+      <_LauncherGit>$([System.String]::Copy($(_LauncherGitRaw)).Trim())</_LauncherGit>
+      <!-- Only append the git commit hash for local builds. -->
+      <SourceRevisionId Condition="'$(AppendSourceRevisionId)' == 'true' and '$(_LauncherGit)' != ''">$(_LauncherGit)</SourceRevisionId>
+    </PropertyGroup>
+  </Target>
+
 </Project>

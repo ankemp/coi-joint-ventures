@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using COIJointVentures.Runtime;
 
 namespace COIJointVentures.Chat;
 
@@ -54,5 +55,7 @@ internal sealed class ChatLog
 
             _version++;
         }
+
+        PluginRuntime.ChatLog?.RecordChatEntry(entry);
     }
 }

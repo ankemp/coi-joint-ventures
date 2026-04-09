@@ -22,8 +22,12 @@ internal static class BundleExtractor
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "JointVentures");
 
-        var currentVersion = Assembly.GetExecutingAssembly()
-            .GetName().Version?.ToString() ?? "dev";
+        // Use InformationalVersion (includes +githash) so any new build triggers re-extraction
+        var asm = Assembly.GetExecutingAssembly();
+        var currentVersion =
+            asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? asm.GetName().Version?.ToString()
+            ?? "dev";
 
         var versionPath = Path.Combine(cacheDir, VersionFile);
         var pluginDir = Path.Combine(cacheDir, "BepInEx", "plugins", "COIJointVentures");

@@ -769,12 +769,14 @@ internal sealed class MultiplayerSession : IDisposable
     private void HandleChatMessage(string senderPeerId, byte[] payload)
     {
         var msg = ProtocolCodec.DecodeChatMessage(payload);
+        _log.LogInfo($"HandleChatMessage Mode={Mode}, SenderPeerId='{senderPeerId}', SenderName='{msg.SenderName}', Text='{msg.Text}', Kind={msg.Kind}");
 
         // host stamps the real sender identity before relaying — don't trust the payload
         if (Mode == MultiplayerMode.Host && senderPeerId != HostPeerId)
         {
             msg.SenderPeerId = senderPeerId;
             msg.SenderName = ResolvePeerName(senderPeerId);
+            _log.LogInfo($"Server received chat from '{senderPeerId}' ({msg.SenderName}): {msg.Text}");
 
             if (msg.Kind == 0 && msg.Text.Trim().Equals("/ping", StringComparison.OrdinalIgnoreCase))
             {
@@ -786,11 +788,12 @@ internal sealed class MultiplayerSession : IDisposable
                     Text = "pong"
                 };
                 _transport.SendToClient(senderPeerId, ProtocolCodec.WrapChatMessage(pong));
-                _log.LogInfo($"[PING] Received ping from '{senderPeerId}', replied with pong.");
+                _log.LogInfo($"Received ping from '{senderPeerId}', replied with pong.");
                 return;
             }
 
             _transport.Broadcast(ProtocolCodec.WrapChatMessage(msg));
+            _log.LogInfo($"Broadcasted chat from '{msg.SenderName}' to clients.");
         }
 
         // skip our own messages, already in the log
@@ -953,26 +956,32 @@ internal sealed class MultiplayerSession : IDisposable
             return;
         }
 
+        _log.LogInfo($"SendChatMessage Mode={Mode}, Player='{LocalPlayerName}', Text='{text}'");
+
         if (WasCommand(text, "/help"))
         {
             var commands = _observedCommands.Count > 0
                 ? string.Join(", ", _observedCommands)
                 : "No commands tracked yet.";
             PluginRuntime.Chat.AddSystem($"Known commands: {commands}");
+            _log.LogInfo("Executed /help command.");
             return;
         }
 
         if (WasCommand(text, "/hiccup"))
         {
+            _log.LogInfo("Executed /hiccup command.");
             ActivateDebugPacketDrop();
             return;
         }
 
         if (WasCommand(text, "/ping"))
         {
+            _log.LogInfo("Executed /ping command.");
             if (Mode == MultiplayerMode.Host)
             {
                 PluginRuntime.Chat.AddSystem("pong");
+                _log.LogInfo("Responded to /ping with pong on host.");
                 return;
             }
 
@@ -986,6 +995,7 @@ internal sealed class MultiplayerSession : IDisposable
 
             _transport.SendToHost(ProtocolCodec.WrapChatMessage(pingMsg));
             PluginRuntime.Chat.AddSystem("Ping sent to server.");
+            _log.LogInfo("Sent ping request to server.");
             return;
         }
 
@@ -1008,6 +1018,7 @@ internal sealed class MultiplayerSession : IDisposable
         }
 
         PluginRuntime.Chat.AddChat(LocalPlayerName, text);
+        _log.LogInfo($"Broadcasted chat from '{LocalPlayerName}': {text}");
     }
 
     public bool WasCommand(string text, string command)

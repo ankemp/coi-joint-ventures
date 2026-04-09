@@ -222,7 +222,7 @@ internal sealed class ChatPanelUI
         var text = _inputField.value?.Trim();
         if (string.IsNullOrEmpty(text)) return;
 
-        PluginRuntime.Session?.SendChatMessage(text);
+        PluginRuntime.Session?.SendChatMessage(text!);
         _inputField.value = "";
         _inputField.Focus();
     }

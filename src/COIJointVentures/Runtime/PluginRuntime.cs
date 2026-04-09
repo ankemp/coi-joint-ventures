@@ -22,6 +22,8 @@ internal static class PluginRuntime
 
     public static RuntimeReplicationLog? ReplicationLog { get; private set; }
 
+    public static RuntimeChatLog? ChatLog { get; private set; }
+
     public static NativeCommandCodec? NativeCodec { get; private set; }
 
     public static InputScheduler? Scheduler { get; private set; }
@@ -30,12 +32,13 @@ internal static class PluginRuntime
 
     public static ChatLog Chat { get; } = new ChatLog();
 
-    public static void Initialize(ManualLogSource log, MultiplayerSession session, RuntimeCommandLog commandLog, RuntimeReplicationLog replicationLog, NativeCommandCodec nativeCodec, SaveFileManager saveManager)
+    public static void Initialize(ManualLogSource log, MultiplayerSession session, RuntimeCommandLog commandLog, RuntimeReplicationLog replicationLog, RuntimeChatLog chatLog, NativeCommandCodec nativeCodec, SaveFileManager saveManager)
     {
         Log = log;
         Session = session;
         CommandLog = commandLog;
         ReplicationLog = replicationLog;
+        ChatLog = chatLog;
         NativeCodec = nativeCodec;
         SaveManager = saveManager;
     }
