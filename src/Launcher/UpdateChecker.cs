@@ -6,7 +6,7 @@ namespace JointVentures.Launcher;
 
 internal static class UpdateChecker
 {
-    private const string GitHubRepo = "Ryan4598/coi-joint-ventures";
+    private const string GitHubRepo = "ankemp/coi-joint-ventures";
     private static readonly string ReleasesUrl =
         $"https://api.github.com/repos/{GitHubRepo}/releases/latest";
     public static readonly string ReleasesPage =

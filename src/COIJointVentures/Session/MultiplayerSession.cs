@@ -318,6 +318,10 @@ internal sealed class MultiplayerSession : IDisposable
         ActiveSince = DateTime.UtcNow;
         StatusMessage = "Connected to server, playing.";
 
+        // clear any desync state — we've just loaded a fresh save
+        DesyncState = DesyncState.None;
+        _lastProcessedHostSequence = -1;
+
         // keep the overlay up until the host says everyone's in
         IsJoinSyncActive = true;
         JoinSyncPlayerName = "players";
@@ -1290,10 +1294,24 @@ internal sealed class MultiplayerSession : IDisposable
 
     private void RequestMajorResync()
     {
-        // Phase 3: send MajorResyncRequest to host, which re-triggers the join flow.
+        if (DesyncState == DesyncState.SimulationDesync)
+            return;  // already in flight
+
         DesyncState = DesyncState.SimulationDesync;
-        _log.LogError("[MAJOR-RESYNC] Simulation desync detected — full resync not yet implemented.");
-        PluginRuntime.Chat.AddSystem("Simulation desync detected. Full resync is not yet implemented.");
+        StatusMessage = "Simulation desync detected — requesting full resync...";
+
+        // flush all in-flight state before the incoming save overwrites everything
+        _pendingCommands.Clear();
+        _outboundCommandIds.Clear();
+        _seenCommandIds.Clear();
+        _pendingHostChecksums.Clear();
+        _lastProcessedHostSequence = -1;
+        _minorResyncInFlight = false;
+        PluginRuntime.DrainReplicated();
+
+        _transport.SendToHost(ProtocolCodec.WrapMajorResyncRequest());
+        _log.LogError("[MAJOR-RESYNC] Simulation desync detected — requesting full save resync from host.");
+        PluginRuntime.Chat.AddSystem("Simulation desync detected. Requesting full resync from host...");
     }
 
     private void HandleMinorResyncRequest(string senderPeerId, byte[] payload)
@@ -1380,10 +1398,17 @@ internal sealed class MultiplayerSession : IDisposable
 
     private void HandleMajorResyncRequest(string senderPeerId)
     {
-        // Phase 3: re-trigger JoinCoordinator for this peer
-        // (pause → save → stream → unpause), same as the original join flow.
-        _log.LogWarning($"[MAJOR-RESYNC] Request from '{senderPeerId}' — not yet implemented.");
-        PluginRuntime.Chat.AddSystem($"Resync requested by {ResolvePeerName(senderPeerId)} — not yet implemented.");
+        if (Mode != MultiplayerMode.Host || _joinCoordinator == null) return;
+
+        var playerName = ResolvePeerName(senderPeerId);
+        _log.LogWarning($"[MAJOR-RESYNC] '{playerName}' ({senderPeerId}) requested full resync.");
+
+        // move back to pending so HandleClientReady transitions correctly
+        lock (_activePeers) { _activePeers.Remove(senderPeerId); }
+        lock (_pendingPeers) { _pendingPeers.Add(senderPeerId); }
+
+        PluginRuntime.Chat.AddSystem($"Resyncing {playerName} — saving and transferring world data...");
+        _joinCoordinator.BeginJoin(senderPeerId, playerName);
     }
 
     // fired when someone drops — could be a client (if we're host) or the host (if we're client)

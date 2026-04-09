@@ -184,6 +184,11 @@ internal static class ProtocolCodec
         return DeserializeJson<MinorResyncResponsePayload>(payload);
     }
 
+    public static byte[] WrapMajorResyncRequest()
+    {
+        return Wrap(ProtocolMessageType.MajorResyncRequest, Array.Empty<byte>());
+    }
+
     public static JoinRequest DecodeJoinRequest(byte[] payload)
     {
         return DeserializeJson<JoinRequest>(payload);

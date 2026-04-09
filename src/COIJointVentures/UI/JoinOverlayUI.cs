@@ -51,8 +51,16 @@ internal sealed class JoinOverlayUI
         var session = bootstrap.Session;
         string? text = null;
 
+        // resyncing client — show blocking overlay immediately on desync detection,
+        // before ReceivingSave state kicks in on the first chunk arriving
+        if (session.Mode == MultiplayerMode.Client
+            && session.DesyncState == DesyncState.SimulationDesync
+            && session.State == Session.ConnectionState.Connected)
+        {
+            text = "Simulation desync detected.\n\nRequesting full resync from host...\nPlease wait.";
+        }
         // joining client — their own receive/load takes priority over IsJoinSyncActive
-        if (session.State == Session.ConnectionState.ReceivingSave ||
+        else if (session.State == Session.ConnectionState.ReceivingSave ||
             session.State == Session.ConnectionState.LoadingSave ||
             session.State == Session.ConnectionState.WaitingForAccept ||
             session.State == Session.ConnectionState.Connecting)
