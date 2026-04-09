@@ -15,5 +15,12 @@ internal enum ProtocolMessageType : byte
     JoinSyncEnd = 0x09,
     ChatMessage = 0x20,
     PlayerList = 0x25,
-    Waypoint = 0x30
+    Waypoint = 0x30,
+
+    // Phase 2: minor catch-up (replay missed commands)
+    MinorResyncRequest  = 0x40,
+    MinorResyncResponse = 0x41,
+
+    // Phase 3: major resync (full save transfer)
+    MajorResyncRequest  = 0x42,
 }

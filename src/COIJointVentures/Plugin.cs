@@ -197,6 +197,7 @@ public sealed class Plugin : BaseUnityPlugin
         }
 
         _bootstrap?.PollTransport();
+        _bootstrap?.Session.TickChecksums();
 
         if (_bootstrap != null)
         {
@@ -236,7 +237,7 @@ public sealed class Plugin : BaseUnityPlugin
 
         if (_desyncIndicator != null && _bootstrap != null)
         {
-            _desyncIndicator.IsDesynced = _bootstrap.Session.HasDesynced;
+            _desyncIndicator.DesyncState = _bootstrap.Session.DesyncState;
         }
     }
 

@@ -1,3 +1,4 @@
+using COIJointVentures.Session;
 using UnityEngine;
 using UnityEngine.UIElements;
 
@@ -10,11 +11,33 @@ internal sealed class DesyncIndicatorUI
 
     public VisualElement Root => _root;
 
-    public bool IsDesynced
+    public DesyncState DesyncState
     {
-        get => _root.style.display == DisplayStyle.Flex;
-        set => _root.style.display = value ? DisplayStyle.Flex : DisplayStyle.None;
+        get => _desyncState;
+        set
+        {
+            if (_desyncState == value) return;
+            _desyncState = value;
+            switch (value)
+            {
+                case DesyncState.SequenceGap:
+                    _root.style.display = DisplayStyle.Flex;
+                    _root.style.backgroundColor = new Color(0.85f, 0.55f, 0.0f, 0.9f);
+                    _warningLabel.text = "\u26a0 PACKET LOSS";
+                    break;
+                case DesyncState.SimulationDesync:
+                    _root.style.display = DisplayStyle.Flex;
+                    _root.style.backgroundColor = new Color(0.8f, 0.1f, 0.1f, 0.9f);
+                    _warningLabel.text = "\u2716 DESYNC DETECTED";
+                    break;
+                default:
+                    _root.style.display = DisplayStyle.None;
+                    break;
+            }
+        }
     }
+
+    private DesyncState _desyncState;
 
     public DesyncIndicatorUI()
     {
@@ -32,7 +55,7 @@ internal sealed class DesyncIndicatorUI
         UIHelpers.SetBorderRadius(_root, 4);
         UIHelpers.SetBorder(_root, 2, Color.white);
 
-        _warningLabel = new Label("⚠️ DESYNC DETECTED");
+        _warningLabel = new Label(string.Empty);
         _warningLabel.style.fontSize = 16;
         _warningLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
         _warningLabel.style.color = Color.white;

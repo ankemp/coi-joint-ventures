@@ -28,13 +28,22 @@ internal sealed class MultiplayerSession : IDisposable
     private readonly PingHandler _pingHandler;
     private bool _simulateDropNextPacket;
 
-    public bool HasDesynced { get; private set; }
+    public DesyncState DesyncState { get; private set; }
+    private long _lastProcessedHostSequence = -1;
+    private int _checksumTickCounter;
+    private readonly CommandHistory _commandHistory = new();
     private readonly HashSet<Guid> _outboundCommandIds = new();
     private readonly HashSet<Guid> _seenCommandIds = new();
     private readonly Dictionary<string, int> _peerColors = new();
     private int _nextColorIndex;
     private int _localColorIndex; // assigned by host, used for local waypoint display
     private long _nextSequence;
+
+    /// <summary>
+    /// Optional probe wired by <see cref="Plugin"/> to contribute a game-model
+    /// value to the state checksum.  Set to null until the sim world is available.
+    /// </summary>
+    public static Func<int>? GameStateProbe { get; set; }
 
     private ServerConfig? _serverConfig;
     private SaveFileManager? _saveManager;
@@ -135,7 +144,8 @@ internal sealed class MultiplayerSession : IDisposable
     {
         _pendingCommands.Clear();
         _pendingHostChecksums.Clear();
-        HasDesynced = false;
+        DesyncState = DesyncState.None;
+        _commandHistory.Clear();
         _serverConfig = config;
         _saveManager = saveManager;
         _currentSavePath = currentSavePath;
@@ -177,7 +187,8 @@ internal sealed class MultiplayerSession : IDisposable
     {
         _pendingCommands.Clear();
         _pendingHostChecksums.Clear();
-        HasDesynced = false;
+        DesyncState = DesyncState.None;
+        _lastProcessedHostSequence = -1;
         LocalPeerId = localPeerId;
         HostPeerId = hostPeerId;
         LocalPlayerName = playerName;
@@ -226,17 +237,6 @@ internal sealed class MultiplayerSession : IDisposable
         if (Mode == MultiplayerMode.Host)
         {
             ApplyAsHost(envelope, apply);
-
-            if (envelope.Sequence % 50 == 0)
-            {
-                var checksumPayload = new StateChecksumPayload
-                {
-                    Sequence = envelope.Sequence,
-                    Checksum = CalculateLocalChecksum()
-                };
-                _transport.Broadcast(ProtocolCodec.WrapStateChecksum(checksumPayload));
-            }
-
             return;
         }
 
@@ -331,7 +331,9 @@ internal sealed class MultiplayerSession : IDisposable
         IsJoinSyncActive = false;
         JoinSyncPlayerName = string.Empty;
         _pendingHostChecksums.Clear();
-        HasDesynced = false;
+        DesyncState = DesyncState.None;
+        _lastProcessedHostSequence = -1;
+        _commandHistory.Clear();
         _pendingCommands.Clear();
         lock (_activePeers) { _activePeers.Clear(); }
         lock (_pendingPeers) { _pendingPeers.Clear(); }
@@ -344,6 +346,7 @@ internal sealed class MultiplayerSession : IDisposable
     {
         _log.LogInfo($"[HOST-APPLY] Broadcasting '{envelope.CommandType}' to all clients.");
         apply(envelope);
+        _commandHistory.Record(envelope);
         _transport.Broadcast(ProtocolCodec.WrapGameCommand(_codec.Encode(envelope)));
     }
 
@@ -416,6 +419,15 @@ internal sealed class MultiplayerSession : IDisposable
                 break;
             case ProtocolMessageType.Waypoint:
                 HandleWaypoint(message.SenderPeerId, payload);
+                break;
+            case ProtocolMessageType.MinorResyncRequest:
+                HandleMinorResyncRequest(message.SenderPeerId, payload);
+                break;
+            case ProtocolMessageType.MinorResyncResponse:
+                HandleMinorResyncResponse(payload);
+                break;
+            case ProtocolMessageType.MajorResyncRequest:
+                HandleMajorResyncRequest(message.SenderPeerId);
                 break;
             default:
                 _log.LogWarning($"Unknown protocol message type: {(byte)msgType} from '{message.SenderPeerId}'.");
@@ -1148,6 +1160,16 @@ internal sealed class MultiplayerSession : IDisposable
                 return;
             }
 
+            if (_lastProcessedHostSequence >= 0 && envelope.Sequence != _lastProcessedHostSequence + 1)
+            {
+                var expected = _lastProcessedHostSequence + 1;
+                _log.LogWarning($"[SEQ-GAP] Expected seq {expected}, got {envelope.Sequence} — {envelope.Sequence - expected} command(s) lost.");
+                if (DesyncState == DesyncState.None)
+                    DesyncState = DesyncState.SequenceGap;
+                OnSequenceGap(expected, envelope.Sequence);
+            }
+            _lastProcessedHostSequence = envelope.Sequence;
+
             _log.LogInfo($"[GAME-CMD] CLIENT: Received host command '{envelope.CommandType}' seq={envelope.Sequence} -> reinject.");
             ReceiveReplicatedCommand(envelope);
 
@@ -1158,7 +1180,7 @@ internal sealed class MultiplayerSession : IDisposable
                 if (localChecksum != hostChecksum)
                 {
                     _log.LogError($"[DESYNC] Sequence {envelope.Sequence}: Host Hash={hostChecksum}, Local Hash={localChecksum}");
-                    HasDesynced = true;
+                    RequestMajorResync();
                 }
             }
 
@@ -1214,7 +1236,69 @@ internal sealed class MultiplayerSession : IDisposable
         }
 
         hash = hash * 31 + PluginRuntime.PendingReplicatedCount;
+
+        var probe = GameStateProbe;
+        if (probe != null)
+        {
+            try { hash = hash * 31 + probe(); }
+            catch { }
+        }
+
         return hash;
+    }
+
+    public void TickChecksums()
+    {
+        if (Mode != MultiplayerMode.Host)
+            return;
+
+        _checksumTickCounter++;
+        if (_checksumTickCounter % 100 != 0)
+            return;
+
+        var checksumPayload = new StateChecksumPayload
+        {
+            Sequence = _nextSequence,
+            Checksum = CalculateLocalChecksum()
+        };
+        _transport.Broadcast(ProtocolCodec.WrapStateChecksum(checksumPayload));
+    }
+
+    private void OnSequenceGap(long expected, long received)
+    {
+        // Phase 2: send MinorResyncRequest(lastSequence: expected - 1) to host.
+        _log.LogWarning($"[MINOR-RESYNC] Sequence gap {expected}..{received - 1} — catch-up not yet implemented.");
+        PluginRuntime.Chat.AddSystem($"Packet loss detected (seq {expected}\u2013{received - 1}). Catch-up not yet implemented.");
+    }
+
+    private void RequestMajorResync()
+    {
+        // Phase 3: send MajorResyncRequest to host, which re-triggers the join flow.
+        DesyncState = DesyncState.SimulationDesync;
+        _log.LogError("[MAJOR-RESYNC] Simulation desync detected — full resync not yet implemented.");
+        PluginRuntime.Chat.AddSystem("Simulation desync detected. Full resync is not yet implemented.");
+    }
+
+    private void HandleMinorResyncRequest(string senderPeerId, byte[] payload)
+    {
+        // Phase 2: parse requested range, call _commandHistory.GetSince(sequence),
+        // then stream the result back as MinorResyncResponse.
+        _log.LogWarning($"[MINOR-RESYNC] Request from '{senderPeerId}' — not yet implemented.");
+    }
+
+    private void HandleMinorResyncResponse(byte[] payload)
+    {
+        // Phase 2: decode batch of CommandEnvelopes, apply in order,
+        // then set DesyncState = DesyncState.None if successful.
+        _log.LogWarning("[MINOR-RESYNC] Response received — not yet implemented.");
+    }
+
+    private void HandleMajorResyncRequest(string senderPeerId)
+    {
+        // Phase 3: re-trigger JoinCoordinator for this peer
+        // (pause → save → stream → unpause), same as the original join flow.
+        _log.LogWarning($"[MAJOR-RESYNC] Request from '{senderPeerId}' — not yet implemented.");
+        PluginRuntime.Chat.AddSystem($"Resync requested by {ResolvePeerName(senderPeerId)} — not yet implemented.");
     }
 
     // fired when someone drops — could be a client (if we're host) or the host (if we're client)
