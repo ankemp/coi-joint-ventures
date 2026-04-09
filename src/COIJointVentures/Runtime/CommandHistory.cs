@@ -43,6 +43,22 @@ internal sealed class CommandHistory
         return result;
     }
 
+    /// <summary>Number of envelopes currently stored (0 – <see cref="Capacity"/>).</summary>
+    public int Count => _count;
+
+    /// <summary>
+    /// The sequence number of the oldest recorded envelope, or <c>null</c> if empty.
+    /// </summary>
+    public long? OldestSequence
+    {
+        get
+        {
+            if (_count == 0) return null;
+            var oldestSlot = _count < Capacity ? 0 : _head;
+            return _buffer[oldestSlot]?.Sequence;
+        }
+    }
+
     public void Clear()
     {
         Array.Clear(_buffer, 0, _buffer.Length);

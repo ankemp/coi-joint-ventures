@@ -198,6 +198,7 @@ public sealed class Plugin : BaseUnityPlugin
 
         _bootstrap?.PollTransport();
         _bootstrap?.Session.TickChecksums();
+        _bootstrap?.Session.TickMinorResync();
 
         if (_bootstrap != null)
         {

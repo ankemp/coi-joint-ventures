@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using BepInEx.Logging;
 using COIJointVentures.Chat;
@@ -31,7 +32,9 @@ internal sealed class MultiplayerSession : IDisposable
     public DesyncState DesyncState { get; private set; }
     private long _lastProcessedHostSequence = -1;
     private int _checksumTickCounter;
-    private readonly CommandHistory _commandHistory = new();
+    private bool _minorResyncInFlight;
+    private DateTime _minorResyncRequestTime;
+    private readonly Runtime.CommandHistory _commandHistory = new();
     private readonly HashSet<Guid> _outboundCommandIds = new();
     private readonly HashSet<Guid> _seenCommandIds = new();
     private readonly Dictionary<string, int> _peerColors = new();
@@ -189,6 +192,8 @@ internal sealed class MultiplayerSession : IDisposable
         _pendingHostChecksums.Clear();
         DesyncState = DesyncState.None;
         _lastProcessedHostSequence = -1;
+        _minorResyncInFlight = false;
+        _minorResyncRequestTime = default;
         LocalPeerId = localPeerId;
         HostPeerId = hostPeerId;
         LocalPlayerName = playerName;
@@ -333,6 +338,8 @@ internal sealed class MultiplayerSession : IDisposable
         _pendingHostChecksums.Clear();
         DesyncState = DesyncState.None;
         _lastProcessedHostSequence = -1;
+        _minorResyncInFlight = false;
+        _minorResyncRequestTime = default;
         _commandHistory.Clear();
         _pendingCommands.Clear();
         lock (_activePeers) { _activePeers.Clear(); }
@@ -1160,7 +1167,7 @@ internal sealed class MultiplayerSession : IDisposable
                 return;
             }
 
-            if (_lastProcessedHostSequence >= 0 && envelope.Sequence != _lastProcessedHostSequence + 1)
+            if (!IsJoinSyncActive && _lastProcessedHostSequence >= 0 && envelope.Sequence != _lastProcessedHostSequence + 1)
             {
                 var expected = _lastProcessedHostSequence + 1;
                 _log.LogWarning($"[SEQ-GAP] Expected seq {expected}, got {envelope.Sequence} — {envelope.Sequence - expected} command(s) lost.");
@@ -1247,6 +1254,16 @@ internal sealed class MultiplayerSession : IDisposable
         return hash;
     }
 
+    public void TickMinorResync()
+    {
+        if (!_minorResyncInFlight) return;
+        if ((DateTime.UtcNow - _minorResyncRequestTime).TotalSeconds < 5.0) return;
+
+        _log.LogWarning("[MINOR-RESYNC] Timed out waiting for response — escalating to major resync.");
+        _minorResyncInFlight = false;
+        RequestMajorResync();
+    }
+
     public void TickChecksums()
     {
         if (Mode != MultiplayerMode.Host)
@@ -1281,16 +1298,84 @@ internal sealed class MultiplayerSession : IDisposable
 
     private void HandleMinorResyncRequest(string senderPeerId, byte[] payload)
     {
-        // Phase 2: parse requested range, call _commandHistory.GetSince(sequence),
-        // then stream the result back as MinorResyncResponse.
-        _log.LogWarning($"[MINOR-RESYNC] Request from '{senderPeerId}' — not yet implemented.");
+        if (Mode != MultiplayerMode.Host) return;
+
+        var request = ProtocolCodec.DecodeMinorResyncRequest(payload);
+        var fromSeq = request.LastProcessedSequence + 1;
+        _log.LogInfo($"[MINOR-RESYNC] Request from '{senderPeerId}': replay from seq={fromSeq}.");
+
+        var oldest = _commandHistory.OldestSequence;
+        if (_commandHistory.Count == 0 || oldest == null || oldest.Value > fromSeq)
+        {
+            _log.LogWarning($"[MINOR-RESYNC] Cannot fulfil: oldest recorded seq={oldest?.ToString() ?? "none"}, requested seq={fromSeq}. Sending FullResyncRequired.");
+            var fallback = new MinorResyncResponsePayload { FullResyncRequired = true };
+            _transport.SendToClient(senderPeerId, ProtocolCodec.WrapMinorResyncResponse(fallback));
+            return;
+        }
+
+        var commands = _commandHistory.GetSince(fromSeq);
+        _log.LogInfo($"[MINOR-RESYNC] Replaying {commands.Count} command(s) to '{senderPeerId}'.");
+        PluginRuntime.Chat.AddSystem($"Catching up {ResolvePeerName(senderPeerId)}: replaying {commands.Count} missed command(s).");
+
+        var response = new MinorResyncResponsePayload { Commands = commands };
+        var encoded = ProtocolCodec.WrapMinorResyncResponse(response);
+
+        if (encoded.Length > ProtocolCodec.MaxChunkSize)
+        {
+            _log.LogWarning($"[MINOR-RESYNC] Batch too large ({encoded.Length} bytes) — sending FullResyncRequired.");
+            var fallback = new MinorResyncResponsePayload { FullResyncRequired = true };
+            _transport.SendToClient(senderPeerId, ProtocolCodec.WrapMinorResyncResponse(fallback));
+            return;
+        }
+
+        _transport.SendToClient(senderPeerId, encoded);
     }
 
     private void HandleMinorResyncResponse(byte[] payload)
     {
-        // Phase 2: decode batch of CommandEnvelopes, apply in order,
-        // then set DesyncState = DesyncState.None if successful.
-        _log.LogWarning("[MINOR-RESYNC] Response received — not yet implemented.");
+        if (Mode != MultiplayerMode.Client) return;
+
+        _minorResyncInFlight = false;
+
+        var response = ProtocolCodec.DecodeMinorResyncResponse(payload);
+
+        if (response.FullResyncRequired)
+        {
+            _log.LogWarning("[MINOR-RESYNC] Host cannot fulfil catch-up — escalating to major resync.");
+            RequestMajorResync();
+            return;
+        }
+
+        _log.LogInfo($"[MINOR-RESYNC] Applying {response.Commands.Count} replayed command(s).");
+
+        foreach (var envelope in response.Commands.OrderBy(e => e.Sequence))
+        {
+            // skip duplicates — may already be in _seenCommandIds if the echo arrived late
+            if (!_seenCommandIds.Add(envelope.CommandId))
+            {
+                _log.LogInfo($"[MINOR-RESYNC] Skipping already-seen envelope seq={envelope.Sequence}.");
+                _lastProcessedHostSequence = envelope.Sequence;
+                continue;
+            }
+
+            // skip our own optimistically-executed commands
+            if (_outboundCommandIds.Remove(envelope.CommandId))
+            {
+                _log.LogInfo($"[MINOR-RESYNC] seq={envelope.Sequence} was our own optimistic command — skipping reinject.");
+                _lastProcessedHostSequence = envelope.Sequence;
+                continue;
+            }
+
+            ReceiveReplicatedCommand(envelope);
+            _lastProcessedHostSequence = envelope.Sequence;
+        }
+
+        if (DesyncState == DesyncState.SequenceGap)
+        {
+            DesyncState = DesyncState.None;
+            _log.LogInfo("[MINOR-RESYNC] Catch-up complete — desync state cleared.");
+            PluginRuntime.Chat.AddSystem("Packet loss recovered.");
+        }
     }
 
     private void HandleMajorResyncRequest(string senderPeerId)
