@@ -21,15 +21,11 @@
     <EmbeddedResource Include="plugin-bundle.zip" LogicalName="plugin-bundle.zip" Condition="Exists('plugin-bundle.zip')" />
   </ItemGroup>
 
-  <!-- Embed git commit hash into AssemblyInformationalVersion (e.g. "0.3.6+abc1234") -->
+  <!-- Embed a build timestamp into AssemblyInformationalVersion for local builds (e.g. "0.3.6-LOCAL+20260409183045") -->
   <Target Name="SetSourceRevisionId" BeforeTargets="GenerateAssemblyInfo">
-    <Exec Command="git rev-parse --short HEAD" ConsoleToMSBuild="true" IgnoreExitCode="true" StandardOutputImportance="Low">
-      <Output TaskParameter="ConsoleOutput" PropertyName="_LauncherGitRaw" />
-    </Exec>
     <PropertyGroup>
-      <_LauncherGit>$([System.String]::Copy($(_LauncherGitRaw)).Trim())</_LauncherGit>
-      <!-- Only append the git commit hash for local builds. -->
-      <SourceRevisionId Condition="'$(AppendSourceRevisionId)' == 'true' and '$(_LauncherGit)' != ''">$(_LauncherGit)</SourceRevisionId>
+      <!-- Only append a build timestamp for local builds, ensuring every rebuild gets a unique version. -->
+      <SourceRevisionId Condition="'$(AppendSourceRevisionId)' == 'true'">$([System.DateTime]::UtcNow.ToString("yyyyMMddHHmmss"))</SourceRevisionId>
     </PropertyGroup>
   </Target>
 
