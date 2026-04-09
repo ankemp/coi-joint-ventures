@@ -23,7 +23,9 @@ internal sealed class MultiplayerSession : IDisposable
     private readonly HashSet<string> _pendingPeers = new();
     private readonly Dictionary<string, string> _peerNames = new();
     private readonly Dictionary<long, int> _pendingHostChecksums = new();
-    private readonly HashSet<string> _observedCommands = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _observedNativeCommands = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ChatCommandHandler _chatCommandHandler;
+    private readonly PingHandler _pingHandler;
     private bool _simulateDropNextPacket;
 
     public bool HasDesynced { get; private set; }
@@ -60,6 +62,8 @@ internal sealed class MultiplayerSession : IDisposable
         _log = log;
         _codec = codec;
         _transport = transport;
+        _chatCommandHandler = new ChatCommandHandler(this, _log);
+        _pingHandler = new PingHandler(this, _transport, _log);
         _transport.MessageReceived += OnTransportMessageReceived;
         _transport.ClientDisconnected += OnClientDisconnected;
     }
@@ -778,17 +782,8 @@ internal sealed class MultiplayerSession : IDisposable
             msg.SenderName = ResolvePeerName(senderPeerId);
             _log.LogInfo($"Server received chat from '{senderPeerId}' ({msg.SenderName}): {msg.Text}");
 
-            if (msg.Kind == 0 && msg.Text.Trim().Equals("/ping", StringComparison.OrdinalIgnoreCase))
+                if (_pingHandler.TryHandleIncomingChatMessage(senderPeerId, msg))
             {
-                var pong = new ChatMessagePayload
-                {
-                    SenderName = "Server",
-                    SenderPeerId = HostPeerId,
-                    Kind = 3, // System
-                    Text = "pong"
-                };
-                _transport.SendToClient(senderPeerId, ProtocolCodec.WrapChatMessage(pong));
-                _log.LogInfo($"Received ping from '{senderPeerId}', replied with pong.");
                 return;
             }
 
@@ -798,6 +793,11 @@ internal sealed class MultiplayerSession : IDisposable
 
         // skip our own messages, already in the log
         if (string.Equals(msg.SenderPeerId, LocalPeerId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (_pingHandler.TryHandleIncomingPong(msg))
         {
             return;
         }
@@ -958,44 +958,8 @@ internal sealed class MultiplayerSession : IDisposable
 
         _log.LogInfo($"SendChatMessage Mode={Mode}, Player='{LocalPlayerName}', Text='{text}'");
 
-        if (WasCommand(text, "/help"))
+        if (_chatCommandHandler.TryHandle(text))
         {
-            var commands = _observedCommands.Count > 0
-                ? string.Join(", ", _observedCommands)
-                : "No commands tracked yet.";
-            PluginRuntime.Chat.AddSystem($"Known commands: {commands}");
-            _log.LogInfo("Executed /help command.");
-            return;
-        }
-
-        if (WasCommand(text, "/hiccup"))
-        {
-            _log.LogInfo("Executed /hiccup command.");
-            ActivateDebugPacketDrop();
-            return;
-        }
-
-        if (WasCommand(text, "/ping"))
-        {
-            _log.LogInfo("Executed /ping command.");
-            if (Mode == MultiplayerMode.Host)
-            {
-                PluginRuntime.Chat.AddSystem("pong");
-                _log.LogInfo("Responded to /ping with pong on host.");
-                return;
-            }
-
-            var pingMsg = new ChatMessagePayload
-            {
-                SenderName = LocalPlayerName,
-                SenderPeerId = LocalPeerId,
-                Kind = 0,
-                Text = text
-            };
-
-            _transport.SendToHost(ProtocolCodec.WrapChatMessage(pingMsg));
-            PluginRuntime.Chat.AddSystem("Ping sent to server.");
-            _log.LogInfo("Sent ping request to server.");
             return;
         }
 
@@ -1021,6 +985,11 @@ internal sealed class MultiplayerSession : IDisposable
         _log.LogInfo($"Broadcasted chat from '{LocalPlayerName}': {text}");
     }
 
+    public void HandlePingCommand(string text)
+    {
+        _pingHandler.HandlePingCommand(text);
+    }
+
     public bool WasCommand(string text, string command)
     {
         if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(command))
@@ -1037,7 +1006,7 @@ internal sealed class MultiplayerSession : IDisposable
 
         if (trimmed.Length == normalized.Length || char.IsWhiteSpace(trimmed[normalized.Length]))
         {
-            _observedCommands.Add(normalized);
+            _observedNativeCommands.Add(normalized);
             return true;
         }
 
