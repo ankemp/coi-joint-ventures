@@ -9,7 +9,7 @@ internal sealed class MinorResyncResponsePayload
 {
     /// <summary>
     /// When true the command history didn't cover the requested range
-    /// and the client must escalate to a full save resync (Phase 3).
+    /// and the client must escalate to a full save resync.
     /// </summary>
     [DataMember(Order = 1)]
     public bool FullResyncRequired { get; set; }

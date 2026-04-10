@@ -1287,9 +1287,23 @@ internal sealed class MultiplayerSession : IDisposable
 
     private void OnSequenceGap(long expected, long received)
     {
-        // Phase 2: send MinorResyncRequest(lastSequence: expected - 1) to host.
-        _log.LogWarning($"[MINOR-RESYNC] Sequence gap {expected}..{received - 1} — catch-up not yet implemented.");
-        PluginRuntime.Chat.AddSystem($"Packet loss detected (seq {expected}\u2013{received - 1}). Catch-up not yet implemented.");
+        var missed = received - expected;
+        _log.LogWarning($"[MINOR-RESYNC] Sequence gap {expected}..{received - 1} ({missed} command(s) missing).");
+
+        if (_minorResyncInFlight)
+        {
+            _log.LogInfo("[MINOR-RESYNC] Request already in flight — skipping duplicate.");
+            return;
+        }
+
+        _minorResyncInFlight = true;
+        _minorResyncRequestTime = DateTime.UtcNow;
+
+        var request = new MinorResyncRequestPayload { LastProcessedSequence = expected - 1 };
+        _transport.SendToHost(ProtocolCodec.WrapMinorResyncRequest(request));
+
+        PluginRuntime.Chat.AddSystem($"Catching up: requesting {missed} missed command(s) from host...");
+        _log.LogInfo($"[MINOR-RESYNC] Sent MinorResyncRequest(lastProcessed={expected - 1}) to host.");
     }
 
     private void RequestMajorResync()

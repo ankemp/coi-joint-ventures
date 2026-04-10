@@ -7,13 +7,13 @@ internal enum DesyncState
 
     /// <summary>
     /// One or more host commands were not received.
-    /// A minor catch-up (Phase 2) may be able to recover this.
+    /// A minor catch-up may be able to recover this.
     /// </summary>
     SequenceGap,
 
     /// <summary>
     /// A state checksum mismatch was detected.
-    /// Only a full save resync (Phase 3) can recover this.
+    /// Only a full save resync can recover this.
     /// </summary>
     SimulationDesync,
 }

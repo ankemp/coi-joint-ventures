@@ -6,7 +6,7 @@ namespace COIJointVentures.Runtime;
 
 /// <summary>
 /// Fixed-size ring buffer that records the last <see cref="Capacity"/> envelopes
-/// broadcast by the host. Used by the Phase 2 minor-resync path to replay missed
+/// broadcast by the host. Used by the minor-resync path to replay missed
 /// commands without requiring a full save transfer.
 /// </summary>
 internal sealed class CommandHistory
