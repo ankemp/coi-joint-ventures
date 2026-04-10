@@ -1,0 +1,87 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Read version
+        id: version
+        shell: pwsh
+        run: |
+          [xml]$props = Get-Content Version.props
+          $v = $props.Project.PropertyGroup.JointVenturesVersion
+          echo "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Download BepInEx
+        shell: pwsh
+        run: |
+          $headers = @{ "User-Agent" = "JointVentures-CI" }
+          $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/BepInEx/BepInEx/releases" -Headers $headers
+          $release = $releases | Where-Object { $_.tag_name -match "^v5\." -and -not $_.prerelease } | Select-Object -First 1
+          $asset = $release.assets | Where-Object { $_.name -match "^BepInEx_win_x64_.*\.zip$" } | Select-Object -First 1
+
+          Write-Host "Downloading $($asset.name)..."
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile bepinex.zip
+
+          $extract = "bepinex-extract"
+          Expand-Archive -Path bepinex.zip -DestinationPath $extract
+
+          New-Item -ItemType Directory -Path "bepinex-bundle\core" -Force | Out-Null
+          New-Item -ItemType Directory -Path "bepinex-bundle\doorstop" -Force | Out-Null
+          Copy-Item "$extract\BepInEx\core\*.dll" -Destination "bepinex-bundle\core"
+          Copy-Item "$extract\winhttp.dll" -Destination "bepinex-bundle\doorstop"
+
+          Remove-Item bepinex.zip, $extract -Recurse -Force
+
+      - name: Download game references
+        shell: pwsh
+        run: |
+          $headers = @{
+            "User-Agent"    = "JointVentures-CI"
+            "Authorization" = "Bearer ${{ secrets.GITHUB_TOKEN }}"
+          }
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/releases/tags/deps" -Headers $headers
+          $asset = $release.assets | Where-Object { $_.name -eq "game-refs.zip" } | Select-Object -First 1
+
+          if (-not $asset) { throw "game-refs.zip not found on the 'deps' release" }
+
+          $dlHeaders = @{
+            "Accept"        = "application/octet-stream"
+            "Authorization" = "Bearer ${{ secrets.GITHUB_TOKEN }}"
+            "User-Agent"    = "JointVentures-CI"
+          }
+          Invoke-WebRequest -Uri "https://api.github.com/repos/${{ github.repository }}/releases/assets/$($asset.id)" -OutFile game-refs.zip -Headers $dlHeaders
+
+          New-Item -ItemType Directory -Path "game-refs" -Force | Out-Null
+          Expand-Archive -Path game-refs.zip -DestinationPath "game-refs"
+          Remove-Item game-refs.zip
+
+      - name: Build plugin
+        shell: pwsh
+        run: |
+          dotnet build src\COIJointVentures\COIJointVentures.csproj `
+            -c Release `
+            -p:ManagedDir="${{ github.workspace }}\game-refs"
+
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-${{ steps.version.outputs.version }}
+          path: |
+            src/COIJointVentures/bin/Release/net472/COIJointVentures.dll
+            src/COIJointVentures/bin/Release/net472/COIJointVentures.pdb
+          retention-days: 30

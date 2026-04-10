@@ -120,6 +120,27 @@ dotnet build src\COIJointVentures\COIJointVentures.csproj
 
 You'll need COI installed. Update `CaptainOfIndustryDir` in the `.csproj` if your game is installed somewhere other than the default path. The build auto-deploys the DLL to `BepInEx/plugins/COIJointVentures/`.
 
+## CI / release process
+
+There are two workflows:
+
+**`build.yml`** — runs on every push to `main`. Downloads BepInEx and the game reference DLLs (from the `deps` release), builds the plugin, and uploads `COIJointVentures.dll` as a versioned GitHub Actions artifact (retained for 30 days). No release is created.
+
+**`release.yml`** — runs when a GitHub release is **created** in the UI. Builds the launcher (which embeds the plugin DLL) and attaches the final downloadable artifacts to the release. It will **fail fast** if the release tag doesn't match the version in `Version.props`, so that mismatch is caught before any build time is spent.
+
+### Cutting a release
+
+1. Bump the version in `Version.props` and push to `main`
+2. Wait for the `build.yml` run to go green
+3. Go to **Releases → Draft a new release** on GitHub
+4. Set the tag to `v<version>` (e.g. `v1.2.0`) — must match `Version.props` exactly
+5. Fill in the release title/notes and click **Publish release**
+6. `release.yml` kicks off automatically and attaches `JointVentures-v<version>.exe` and `COIJointVentures.dll` to the release
+
+### game-refs.zip (dependency)
+
+The plugin build references COI game DLLs that can't be committed to source. These are stored as `game-refs.zip` on a permanent `deps` release in this repo. If those DLLs ever need to be updated, re-upload `game-refs.zip` to the `deps` release.
+
 ## Troubleshooting
 
 - **Mod doesn't load** - make sure you have BepInEx 5.x (not 6.x) installed correctly. Check `BepInEx/LogOutput.log` for errors.
