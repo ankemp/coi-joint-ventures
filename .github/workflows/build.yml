@@ -29,7 +29,10 @@ jobs:
       - name: Download BepInEx
         shell: pwsh
         run: |
-          $headers = @{ "User-Agent" = "JointVentures-CI" }
+          $headers = @{
+            "User-Agent"    = "JointVentures-CI"
+            "Authorization" = "Bearer ${{ secrets.GITHUB_TOKEN }}"
+          }
           $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/BepInEx/BepInEx/releases" -Headers $headers
           $release = $releases | Where-Object { $_.tag_name -match "^v5\." -and -not $_.prerelease } | Select-Object -First 1
           $asset = $release.assets | Where-Object { $_.name -match "^BepInEx_win_x64_.*\.zip$" } | Select-Object -First 1
