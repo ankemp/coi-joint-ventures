@@ -24,6 +24,7 @@ internal sealed class SteamTransport : INetworkTransport, ISocketManager, IConne
     private SocketManager? _socketManager;
     private Lobby? _lobby;
     private readonly Dictionary<uint, PeerConnection> _peerConnections = new();
+    private readonly Dictionary<uint, Queue<byte[]>> _outboundQueues = new();
 
     // Client state
     private ConnectionManager? _connectionManager;
@@ -116,6 +117,37 @@ internal sealed class SteamTransport : INetworkTransport, ISocketManager, IConne
         {
             _log.LogWarning($"Steam connection receive error: {ex.Message}");
         }
+
+        // Flush any queued outbound packets without blocking the game thread.
+        lock (_gate)
+        {
+            foreach (var kvp in _outboundQueues)
+            {
+                var connId = kvp.Key;
+                var queue = kvp.Value;
+                var connection = GetConnectionById(connId);
+                if (!connection.HasValue)
+                    continue;
+
+                while (queue.Count > 0)
+                {
+                    var payload = queue.Peek();
+                    var result = connection.Value.SendMessage(payload, SendType.Reliable | SendType.NoNagle, 0);
+
+                    if (result == Result.OK)
+                    {
+                        queue.Dequeue();
+                        continue;
+                    }
+
+                    if (result == Result.LimitExceeded)
+                        break;
+
+                    _log.LogWarning($"Steam queued send failed: {result}. Dropping packet.");
+                    queue.Dequeue();
+                }
+            }
+        }
     }
 
     public void Broadcast(byte[] payload)
@@ -128,7 +160,7 @@ internal sealed class SteamTransport : INetworkTransport, ISocketManager, IConne
 
         foreach (var peer in snapshot)
         {
-            SendWithRetry(peer.Connection, payload, $"broadcast to {peer.PeerId}");
+            EnqueueOrSend(peer.Connection, payload, $"broadcast to {peer.PeerId}");
         }
     }
 
@@ -153,7 +185,7 @@ internal sealed class SteamTransport : INetworkTransport, ISocketManager, IConne
             return;
         }
 
-        SendWithRetry(target.Connection, payload, $"send-to-client({peerId})");
+        EnqueueOrSend(target.Connection, payload, $"send-to-client({peerId})");
     }
 
     public void SendToHost(byte[] payload)
@@ -163,7 +195,37 @@ internal sealed class SteamTransport : INetworkTransport, ISocketManager, IConne
             throw new InvalidOperationException("Not connected to host.");
         }
 
-        SendWithRetry(_connectionManager.Connection, payload, "send-to-host");
+        EnqueueOrSend(_connectionManager.Connection, payload, "send-to-host");
+    }
+
+    private void EnqueueOrSend(Connection connection, byte[] payload, string operation)
+    {
+        lock (_gate)
+        {
+            if (!_outboundQueues.TryGetValue(connection.Id, out var queue))
+            {
+                queue = new Queue<byte[]>();
+                _outboundQueues[connection.Id] = queue;
+            }
+
+            if (queue.Count > 0)
+            {
+                queue.Enqueue(payload);
+                return;
+            }
+
+            var result = connection.SendMessage(payload, SendType.Reliable | SendType.NoNagle, 0);
+            if (result == Result.OK)
+                return;
+
+            if (result == Result.LimitExceeded)
+            {
+                queue.Enqueue(payload);
+                return;
+            }
+
+            _log.LogWarning($"Steam {operation} failed: {result}");
+        }
     }
 
     /// <summary>
@@ -181,25 +243,6 @@ internal sealed class SteamTransport : INetworkTransport, ISocketManager, IConne
 
         _log.LogWarning($"Steam {operation} failed: {result}");
         return false;
-    }
-
-    private void SendWithRetry(Connection connection, byte[] payload, string operation)
-    {
-        for (int attempt = 0; attempt < 15; attempt++)
-        {
-            var result = connection.SendMessage(payload, SendType.Reliable | SendType.NoNagle, 0);
-            if (result == Result.OK)
-                return;
-
-            if (result == Result.LimitExceeded && attempt < 14)
-            {
-                System.Threading.Thread.Sleep(20);
-                continue;
-            }
-
-            _log.LogWarning($"Steam {operation} failed: {result} (attempt {attempt + 1})");
-            return;
-        }
     }
 
     private void ConfigureConnection(Connection connection)
@@ -248,6 +291,17 @@ internal sealed class SteamTransport : INetworkTransport, ISocketManager, IConne
                     return entry.Connection;
             }
         }
+
+        return null;
+    }
+
+    private Connection? GetConnectionById(uint connectionId)
+    {
+        if (_connectionManager != null && _connectionManager.Connection.Id == connectionId)
+            return _connectionManager.Connection;
+
+        if (_peerConnections.TryGetValue(connectionId, out var peer))
+            return peer.Connection;
 
         return null;
     }
@@ -315,6 +369,7 @@ internal sealed class SteamTransport : INetworkTransport, ISocketManager, IConne
         lock (_gate)
         {
             _peerConnections.Clear();
+            _outboundQueues.Clear();
         }
     }
 
@@ -382,6 +437,8 @@ internal sealed class SteamTransport : INetworkTransport, ISocketManager, IConne
                 peerId = entry.PeerId;
                 _peerConnections.Remove(connection.Id);
             }
+
+            _outboundQueues.Remove(connection.Id);
         }
 
         if (peerId != null)
@@ -430,6 +487,13 @@ internal sealed class SteamTransport : INetworkTransport, ISocketManager, IConne
     {
         _isConnected = false;
         _log.LogInfo($"Steam: disconnected from host (reason: {info.EndReason}).");
+
+        lock (_gate)
+        {
+            if (_connectionManager != null)
+                _outboundQueues.Remove(_connectionManager.Connection.Id);
+        }
+
         ClientDisconnected?.Invoke(_hostPeerId ?? "host");
     }
 
