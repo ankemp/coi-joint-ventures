@@ -39,6 +39,9 @@ internal static class ProtocolCodec
     // steam supports up to 512KB per message natively, 256KB gives us headroom
     public const int MaxChunkSize = 256 * 1024;
 
+    // data capacity per command chunk — leaves 64 bytes for type byte + Guid + index header
+    public const int MaxCommandChunkDataSize = MaxChunkSize - 64;
+
     public static byte[] WrapSaveData(byte[] saveBytes)
     {
         return Wrap(ProtocolMessageType.SaveData, saveBytes);
@@ -187,6 +190,49 @@ internal static class ProtocolCodec
     public static byte[] WrapMajorResyncRequest()
     {
         return Wrap(ProtocolMessageType.MajorResyncRequest, Array.Empty<byte>());
+    }
+
+    // CommandChunkStart payload: [commandId:16][totalChunks:4][totalSize:4]
+    public static byte[] WrapCommandChunkStart(Guid commandId, int totalChunks, int totalSize)
+    {
+        var payload = new byte[24];
+        var idBytes = commandId.ToByteArray();
+        Buffer.BlockCopy(idBytes, 0, payload, 0, 16);
+        Buffer.BlockCopy(BitConverter.GetBytes(totalChunks), 0, payload, 16, 4);
+        Buffer.BlockCopy(BitConverter.GetBytes(totalSize), 0, payload, 20, 4);
+        return Wrap(ProtocolMessageType.CommandChunkStart, payload);
+    }
+
+    public static void DecodeCommandChunkStart(byte[] payload, out Guid commandId, out int totalChunks, out int totalSize)
+    {
+        var idBytes = new byte[16];
+        Buffer.BlockCopy(payload, 0, idBytes, 0, 16);
+        commandId = new Guid(idBytes);
+        totalChunks = BitConverter.ToInt32(payload, 16);
+        totalSize = BitConverter.ToInt32(payload, 20);
+    }
+
+    // CommandChunk payload: [commandId:16][chunkIndex:4][data...]
+    public static byte[] WrapCommandChunk(Guid commandId, int chunkIndex, byte[] chunkData)
+    {
+        var header = new byte[20];
+        var idBytes = commandId.ToByteArray();
+        Buffer.BlockCopy(idBytes, 0, header, 0, 16);
+        Buffer.BlockCopy(BitConverter.GetBytes(chunkIndex), 0, header, 16, 4);
+        var payload = new byte[header.Length + chunkData.Length];
+        Buffer.BlockCopy(header, 0, payload, 0, header.Length);
+        Buffer.BlockCopy(chunkData, 0, payload, header.Length, chunkData.Length);
+        return Wrap(ProtocolMessageType.CommandChunk, payload);
+    }
+
+    public static void DecodeCommandChunk(byte[] payload, out Guid commandId, out int chunkIndex, out byte[] chunkData)
+    {
+        var idBytes = new byte[16];
+        Buffer.BlockCopy(payload, 0, idBytes, 0, 16);
+        commandId = new Guid(idBytes);
+        chunkIndex = BitConverter.ToInt32(payload, 16);
+        chunkData = new byte[payload.Length - 20];
+        Buffer.BlockCopy(payload, 20, chunkData, 0, chunkData.Length);
     }
 
     public static JoinRequest DecodeJoinRequest(byte[] payload)

@@ -1,8 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Threading;
 using BepInEx.Logging;
 using COIJointVentures.Chat;
 using COIJointVentures.Commands;
@@ -10,37 +7,77 @@ using COIJointVentures.Integration;
 using COIJointVentures.Networking;
 using COIJointVentures.Networking.Protocol;
 using COIJointVentures.Runtime;
-using Mafi.Core.Input;
 
 namespace COIJointVentures.Session;
 
-internal sealed class MultiplayerSession : IDisposable
+internal sealed partial class MultiplayerSession : IDisposable
 {
+    // ── Infrastructure ────────────────────────────────────────────────────────
     private readonly ManualLogSource _log;
     private readonly ICommandCodec _codec;
     private readonly INetworkTransport _transport;
-    private readonly Queue<PendingCommand> _pendingCommands = new();
+    private readonly ChatCommandHandler _chatCommandHandler;
+    private readonly PingHandler _pingHandler;
+
+    // ── Session identity ──────────────────────────────────────────────────────
+    public MultiplayerMode Mode { get; private set; }
+    public ConnectionState State { get; private set; }
+    public string LocalPeerId { get; private set; } = string.Empty;
+    public string HostPeerId { get; private set; } = string.Empty;
+    public string StatusMessage { get; private set; } = string.Empty;
+    public string LocalPlayerName { get; private set; } = string.Empty;
+    public DateTime? ActiveSince { get; private set; }  // when we went active, used for the startup grace period
+    public bool HostDisconnected { get; private set; }  // set when the host drops us — the plugin checks this and boots us to menu
+
+    // ── Player registry (see MultiplayerSession.Players.cs) ──────────────────
     private readonly HashSet<string> _activePeers = new();
     private readonly HashSet<string> _pendingPeers = new();
     private readonly Dictionary<string, string> _peerNames = new();
-    private readonly Dictionary<long, int> _pendingHostChecksums = new();
-    private readonly HashSet<string> _observedNativeCommands = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ChatCommandHandler _chatCommandHandler;
-    private readonly PingHandler _pingHandler;
-    private bool _simulateDropNextPacket;
+    private readonly Dictionary<string, int> _peerColors = new();
+    private readonly List<PlayerInfo> _playerList = new();
+    private int _nextColorIndex;
+    private int _localColorIndex; // assigned by host, used for local waypoint display
 
+    // ── Join coordination (see MultiplayerSession.Join.cs) ───────────────────
+    private ServerConfig? _serverConfig;
+    private JoinCoordinator? _joinCoordinator;
+    private SaveManagerBridge? _saveBridge;
+    public JoinCoordinator? JoinCoordinator => _joinCoordinator;
+    public bool IsJoinSyncActive { get; private set; }
+    public string JoinSyncPlayerName { get; private set; } = string.Empty;
+
+    // ── Save transfer (see MultiplayerSession.Save.cs) ───────────────────────
+    private SaveFileManager? _saveManager;
+    private string? _currentSavePath;
+    private byte[]? _receivedSaveData;
+    private string? _receivedSavePath;
+    private byte[]? _saveChunkBuffer;       // client-side chunked save reassembly
+    private int _saveChunksReceived;
+    private int _saveChunksExpected;
+    private readonly Queue<(string peerId, byte[] payload)> _pendingSends = new();  // burst sender queue
+    public byte[]? ReceivedSaveData => _receivedSaveData;
+    public string? ReceivedSavePath => _receivedSavePath;
+
+    // ── Command pipeline (see MultiplayerSession.Commands.cs) ────────────────
+    private readonly Queue<PendingCommand> _pendingCommands = new();
+    private readonly HashSet<Guid> _outboundCommandIds = new();
+    private readonly HashSet<Guid> _seenCommandIds = new();
+    private readonly Dictionary<Guid, PendingAck> _pendingAcks = new();
+    private readonly Dictionary<Guid, CommandReassemblyBuffer> _commandChunkBuffers = new();
+    private readonly HashSet<string> _observedNativeCommands = new(StringComparer.OrdinalIgnoreCase);
+    private long _nextSequence;
+    private bool _simulateDropNextPacket;
+    private const double AckTimeoutSeconds = 3.0;
+    private const int MaxCommandSize = 4 * 1024 * 1024; // 4 MB hard cap
+
+    // ── Resync / desync (see MultiplayerSession.Resync.cs) ───────────────────
     public DesyncState DesyncState { get; private set; }
     private long _lastProcessedHostSequence = -1;
     private int _checksumTickCounter;
     private bool _minorResyncInFlight;
     private DateTime _minorResyncRequestTime;
     private readonly Runtime.CommandHistory _commandHistory = new();
-    private readonly HashSet<Guid> _outboundCommandIds = new();
-    private readonly HashSet<Guid> _seenCommandIds = new();
-    private readonly Dictionary<string, int> _peerColors = new();
-    private int _nextColorIndex;
-    private int _localColorIndex; // assigned by host, used for local waypoint display
-    private long _nextSequence;
+    private readonly Dictionary<long, int> _pendingHostChecksums = new();
 
     /// <summary>
     /// Optional probe wired by <see cref="Plugin"/> to contribute a game-model
@@ -48,26 +85,7 @@ internal sealed class MultiplayerSession : IDisposable
     /// </summary>
     public static Func<int>? GameStateProbe { get; set; }
 
-    private ServerConfig? _serverConfig;
-    private SaveFileManager? _saveManager;
-    private string? _currentSavePath;
-
-    // Host-side: join coordination
-    private JoinCoordinator? _joinCoordinator;
-    private SaveManagerBridge? _saveBridge;
-
-    // Client-side: join sync overlay
-    public bool IsJoinSyncActive { get; private set; }
-    public string JoinSyncPlayerName { get; private set; } = string.Empty;
-
-    // Client-side: save data received from host, waiting to be written/loaded
-    private byte[]? _receivedSaveData;
-    private string? _receivedSavePath;
-
-    // Client-side: chunked save reassembly
-    private byte[]? _saveChunkBuffer;
-    private int _saveChunksReceived;
-    private int _saveChunksExpected;
+    // ─────────────────────────────────────────────────────────────────────────
 
     public MultiplayerSession(ManualLogSource log, ICommandCodec codec, INetworkTransport transport)
     {
@@ -80,75 +98,13 @@ internal sealed class MultiplayerSession : IDisposable
         _transport.ClientDisconnected += OnClientDisconnected;
     }
 
-    public MultiplayerMode Mode { get; private set; }
-
-    public ConnectionState State { get; private set; }
-
-    public string LocalPeerId { get; private set; } = string.Empty;
-
-    public string HostPeerId { get; private set; } = string.Empty;
-
-    public string StatusMessage { get; private set; } = string.Empty;
-
-    // when we went active, used for the startup grace period
-    public DateTime? ActiveSince { get; private set; }
-
-    public JoinCoordinator? JoinCoordinator => _joinCoordinator;
-
-    public string LocalPlayerName { get; private set; } = string.Empty;
-
-    // set when the host drops us — the plugin checks this and boots us to menu
-    public bool HostDisconnected { get; private set; }
-
-    public IReadOnlyCollection<string> ActivePeers
-    {
-        get
-        {
-            lock (_activePeers)
-            {
-                return new List<string>(_activePeers);
-            }
-        }
-    }
-
-    public IReadOnlyCollection<string> PendingPeers
-    {
-        get
-        {
-            lock (_pendingPeers)
-            {
-                return new List<string>(_pendingPeers);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Full player list with display names and color indices.
-    /// On the host this is built from local state. On clients it's
-    /// received from the host via PlayerList messages.
-    /// </summary>
-    public List<PlayerInfo> PlayerList
-    {
-        get
-        {
-            lock (_playerList)
-            {
-                return new List<PlayerInfo>(_playerList);
-            }
-        }
-    }
-
-    private readonly List<PlayerInfo> _playerList = new();
-
-    public byte[]? ReceivedSaveData => _receivedSaveData;
-    public string? ReceivedSavePath => _receivedSavePath;
-
     public void StartAsHost(string peerId, ServerConfig config, SaveFileManager saveManager, string? currentSavePath)
     {
         _pendingCommands.Clear();
         _pendingHostChecksums.Clear();
         DesyncState = DesyncState.None;
         _commandHistory.Clear();
+        _commandChunkBuffers.Clear();
         _serverConfig = config;
         _saveManager = saveManager;
         _currentSavePath = currentSavePath;
@@ -194,6 +150,7 @@ internal sealed class MultiplayerSession : IDisposable
         _lastProcessedHostSequence = -1;
         _minorResyncInFlight = false;
         _minorResyncRequestTime = default;
+        _pendingAcks.Clear();
         LocalPeerId = localPeerId;
         HostPeerId = hostPeerId;
         LocalPlayerName = playerName;
@@ -228,108 +185,6 @@ internal sealed class MultiplayerSession : IDisposable
         _log.LogInfo($"Sent join request as '{playerName}'.");
     }
 
-    public void SubmitLocalCommand(string commandType, string payloadJson, Action<CommandEnvelope> apply)
-    {
-        var envelope = new CommandEnvelope
-        {
-            CommandType = commandType,
-            IssuerPlayerId = LocalPeerId,
-            Sequence = Interlocked.Increment(ref _nextSequence),
-            Tick = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            PayloadJson = payloadJson
-        };
-
-        if (Mode == MultiplayerMode.Host)
-        {
-            ApplyAsHost(envelope, apply);
-            return;
-        }
-
-        // remember this ID so we drop the echo when host sends it back
-        _outboundCommandIds.Add(envelope.CommandId);
-        _pendingCommands.Enqueue(new PendingCommand(envelope));
-        _transport.SendToHost(ProtocolCodec.WrapGameCommand(_codec.Encode(envelope)));
-    }
-
-    public bool ShouldReplicateCommand(NativeCommandInfo command)
-    {
-        if (Mode == MultiplayerMode.None)
-        {
-            return false;
-        }
-
-        if (command.IsVerificationCmd)
-        {
-            return false;
-        }
-
-        // replicate everything except verification cmds
-        // (pause cmd has AffectsSaveState=false but still needs to go through)
-        return true;
-    }
-
-    public void SubmitNativeCommand(IInputCommand command, NativeCommandCodec codec)
-    {
-        var typeName = command.GetType().FullName ?? command.GetType().Name;
-        var payloadBase64 = codec.SerializeToBase64(command);
-        SubmitLocalCommand(typeName, payloadBase64, _ => { });
-    }
-
-    public void ReceiveReplicatedCommand(CommandEnvelope envelope)
-    {
-        var codec = PluginRuntime.NativeCodec;
-        if (codec == null)
-        {
-            _log.LogWarning($"[RECV] Cannot deserialize '{envelope.CommandType}' — codec unavailable.");
-            return;
-        }
-
-        try
-        {
-            var nativeCommand = codec.DeserializeFromBase64(envelope.PayloadJson);
-            var deserializedType = nativeCommand.GetType().FullName ?? nativeCommand.GetType().Name;
-            var isProcessed = false;
-            try { isProcessed = nativeCommand.IsProcessed; } catch { }
-            _log.LogInfo($"[RECV] Deserialized '{envelope.CommandType}' -> actual type='{deserializedType}', IsProcessed={isProcessed}, AffectsSaveState={nativeCommand.AffectsSaveState}");
-            PluginRuntime.EnqueueReplicated(nativeCommand);
-            _log.LogInfo($"[RECV] Buffered '{deserializedType}' for injection. Buffer size={PluginRuntime.PendingReplicatedCount}");
-        }
-        catch (Exception ex)
-        {
-            _log.LogError($"[RECV] FAILED to deserialize '{envelope.CommandType}': {ex}");
-        }
-    }
-
-    public void ClearReceivedSave()
-    {
-        _receivedSaveData = null;
-        _receivedSavePath = null;
-    }
-
-    public void ConfirmSaveLoaded()
-    {
-        if (State != ConnectionState.ReceivingSave && State != ConnectionState.LoadingSave)
-        {
-            return;
-        }
-
-        State = ConnectionState.Connected;
-        Mode = MultiplayerMode.Client;
-        ActiveSince = DateTime.UtcNow;
-        StatusMessage = "Connected to server, playing.";
-
-        // clear any desync state — we've just loaded a fresh save
-        DesyncState = DesyncState.None;
-        _lastProcessedHostSequence = -1;
-
-        // keep the overlay up until the host says everyone's in
-        IsJoinSyncActive = true;
-        JoinSyncPlayerName = "players";
-
-        _transport.SendToHost(ProtocolCodec.WrapClientReady());
-        _log.LogInfo("Save loaded, sent ClientReady to host. Waiting for JoinSyncEnd.");
-    }
-
     public void Disconnect()
     {
         _transport.Dispose();
@@ -346,6 +201,8 @@ internal sealed class MultiplayerSession : IDisposable
         _minorResyncRequestTime = default;
         _commandHistory.Clear();
         _pendingCommands.Clear();
+        _pendingAcks.Clear();
+        _commandChunkBuffers.Clear();
         lock (_activePeers) { _activePeers.Clear(); }
         lock (_pendingPeers) { _pendingPeers.Clear(); }
         _receivedSaveData = null;
@@ -353,13 +210,18 @@ internal sealed class MultiplayerSession : IDisposable
         _log.LogInfo("Session disconnected.");
     }
 
-    private void ApplyAsHost(CommandEnvelope envelope, Action<CommandEnvelope> apply)
+    public void Dispose()
     {
-        _log.LogInfo($"[HOST-APPLY] Broadcasting '{envelope.CommandType}' to all clients.");
-        apply(envelope);
-        _commandHistory.Record(envelope);
-        _transport.Broadcast(ProtocolCodec.WrapGameCommand(_codec.Encode(envelope)));
+        _transport.MessageReceived -= OnTransportMessageReceived;
+        _transport.ClientDisconnected -= OnClientDisconnected;
     }
+
+    public void TickJoinCoordinator()
+    {
+        _joinCoordinator?.Tick();
+    }
+
+    // ── Message dispatch ──────────────────────────────────────────────────────
 
     private void OnTransportMessageReceived(TransportMessage message)
     {
@@ -440,990 +302,19 @@ internal sealed class MultiplayerSession : IDisposable
             case ProtocolMessageType.MajorResyncRequest:
                 HandleMajorResyncRequest(message.SenderPeerId);
                 break;
+            case ProtocolMessageType.CommandChunkStart:
+                HandleCommandChunkStart(message.SenderPeerId, payload);
+                break;
+            case ProtocolMessageType.CommandChunk:
+                HandleCommandChunk(message.SenderPeerId, payload);
+                break;
             default:
                 _log.LogWarning($"Unknown protocol message type: {(byte)msgType} from '{message.SenderPeerId}'.");
                 break;
         }
     }
 
-    private void HandleJoinRequest(string senderPeerId, byte[] payload)
-    {
-        if (Mode != MultiplayerMode.Host)
-        {
-            _log.LogWarning($"Received JoinRequest from '{senderPeerId}' but not in host mode.");
-            return;
-        }
-
-        var request = ProtocolCodec.DecodeJoinRequest(payload);
-        _log.LogInfo($"Received join request from '{request.PlayerName}'.");
-
-        // check version
-        if (!string.Equals(request.ModVersion, Plugin.PluginVersion, StringComparison.Ordinal))
-        {
-            var clientVer = string.IsNullOrEmpty(request.ModVersion) ? "unknown" : request.ModVersion;
-            _log.LogInfo($"Rejected '{request.PlayerName}': version mismatch (client={clientVer}, host={Plugin.PluginVersion}).");
-            var rejection = new JoinResponse
-            {
-                Accepted = false,
-                Reason = $"Version mismatch: you have {clientVer}, host has {Plugin.PluginVersion}."
-            };
-            _transport.SendToClient(senderPeerId, ProtocolCodec.WrapJoinRejected(rejection));
-            return;
-        }
-
-        // check password
-        if (_serverConfig != null && _serverConfig.HasPassword)
-        {
-            if (!string.Equals(_serverConfig.Password, request.Password, StringComparison.Ordinal))
-            {
-                _log.LogInfo($"Rejected '{request.PlayerName}': wrong password.");
-                var rejection = new JoinResponse
-                {
-                    Accepted = false,
-                    Reason = "Incorrect password."
-                };
-                _transport.SendToClient(senderPeerId, ProtocolCodec.WrapJoinRejected(rejection));
-                return;
-            }
-        }
-
-        // looks good, let em in
-        lock (_peerNames) { _peerNames[senderPeerId] = request.PlayerName; }
-        lock (_pendingPeers) { _pendingPeers.Add(senderPeerId); }
-
-        var acceptance = new JoinResponse
-        {
-            Accepted = true,
-            ServerName = _serverConfig?.ServerName ?? "COI Server",
-            AssignedPeerId = senderPeerId,
-            ColorIndex = GetOrAssignColor(senderPeerId)
-        };
-        _transport.SendToClient(senderPeerId, ProtocolCodec.WrapJoinAccepted(acceptance));
-        _log.LogInfo($"Accepted '{request.PlayerName}' (peer={senderPeerId}). Starting coordinated join...");
-
-        // kick off the whole pause->save->send->wait flow
-        if (_joinCoordinator != null)
-        {
-            _joinCoordinator.BeginJoin(senderPeerId, request.PlayerName);
-        }
-        else
-        {
-            // fallback if coordinator isn't set up
-            SendSaveToClient(senderPeerId);
-        }
-    }
-
-    private void SendSaveToClient(string peerId)
-    {
-        if (_saveManager == null)
-        {
-            _log.LogWarning("Save manager not available, cannot send save to client.");
-            return;
-        }
-
-        var savePath = _currentSavePath ?? _saveManager.FindMostRecentSave();
-        if (savePath == null)
-        {
-            _log.LogWarning("No save file found to send to client.");
-            _transport.SendToClient(peerId, ProtocolCodec.WrapSaveData(Array.Empty<byte>()));
-            return;
-        }
-
-        var saveBytes = _saveManager.ReadSaveFile(savePath);
-        if (saveBytes == null || saveBytes.Length == 0)
-        {
-            _log.LogWarning($"Failed to read save file: {savePath}");
-            _transport.SendToClient(peerId, ProtocolCodec.WrapSaveData(Array.Empty<byte>()));
-            return;
-        }
-
-        // chunk it up so steam doesn't choke
-        var chunkSize = ProtocolCodec.MaxChunkSize;
-        var totalChunks = (saveBytes.Length + chunkSize - 1) / chunkSize;
-        _log.LogInfo($"Sending save to '{peerId}': {saveBytes.Length} bytes in {totalChunks} chunk(s) from {savePath}");
-
-        for (int i = 0; i < totalChunks; i++)
-        {
-            var offset = i * chunkSize;
-            var length = Math.Min(chunkSize, saveBytes.Length - offset);
-            var chunk = new byte[length];
-            Buffer.BlockCopy(saveBytes, offset, chunk, 0, length);
-            _transport.SendToClient(peerId, ProtocolCodec.WrapSaveChunk(i, totalChunks, saveBytes.Length, chunk));
-        }
-
-        _transport.SendToClient(peerId, ProtocolCodec.WrapSaveComplete());
-        _log.LogInfo($"Save transfer complete to '{peerId}'.");
-    }
-
-    // burst sender - fires as many chunks as steam will accept per tick,
-    // backs off on LimitExceeded and picks up next tick
-    private readonly Queue<(string peerId, byte[] payload)> _pendingSends = new();
-
-    public bool HasPendingSends => _pendingSends.Count > 0;
-
-    public void TickPendingSends()
-    {
-        if (_pendingSends.Count == 0)
-            return;
-
-        var steam = _transport as SteamTransport;
-        if (steam == null)
-        {
-            // non-steam transport, just send everything
-            while (_pendingSends.Count > 0)
-            {
-                var (peerId, payload) = _pendingSends.Dequeue();
-                _transport.SendToClient(peerId, payload);
-            }
-            return;
-        }
-
-        // send as many as the buffer will take, stop on LimitExceeded
-        while (_pendingSends.Count > 0)
-        {
-            var (peerId, payload) = _pendingSends.Peek();
-            var conn = steam.GetConnectionForPeer(peerId);
-            if (conn == null)
-            {
-                _pendingSends.Dequeue();
-                continue;
-            }
-
-            if (!steam.TrySend(conn.Value, payload, $"chunk to {peerId}"))
-            {
-                // buffer full, try again next tick
-                break;
-            }
-
-            _pendingSends.Dequeue();
-        }
-    }
-
-    private void SendSaveToClients(IEnumerable<string> peerIds, byte[] saveBytes)
-    {
-        var chunkSize = ProtocolCodec.MaxChunkSize;
-        var totalChunks = (saveBytes.Length + chunkSize - 1) / chunkSize;
-        var peerList = new List<string>(peerIds);
-
-        foreach (var peerId in peerList)
-        {
-            _log.LogInfo($"Queuing save for '{peerId}': {saveBytes.Length} bytes in {totalChunks} chunk(s)");
-
-            for (int i = 0; i < totalChunks; i++)
-            {
-                var offset = i * chunkSize;
-                var length = Math.Min(chunkSize, saveBytes.Length - offset);
-                var chunk = new byte[length];
-                Buffer.BlockCopy(saveBytes, offset, chunk, 0, length);
-                _pendingSends.Enqueue((peerId, ProtocolCodec.WrapSaveChunk(i, totalChunks, saveBytes.Length, chunk)));
-            }
-
-            _pendingSends.Enqueue((peerId, ProtocolCodec.WrapSaveComplete()));
-        }
-
-        _log.LogInfo($"Queued {_pendingSends.Count} send operations for {peerList.Count} client(s).");
-    }
-
-    private void HandleJoinAccepted(byte[] payload)
-    {
-        if (State != ConnectionState.WaitingForAccept)
-        {
-            return;
-        }
-
-        var response = ProtocolCodec.DecodeJoinResponse(payload);
-        _localColorIndex = response.ColorIndex;
-        State = ConnectionState.ReceivingSave;
-        StatusMessage = $"Accepted by '{response.ServerName}', receiving save...";
-        _log.LogInfo($"{StatusMessage} (assigned color {_localColorIndex})");
-    }
-
-    private void HandleJoinRejected(byte[] payload)
-    {
-        var response = ProtocolCodec.DecodeJoinResponse(payload);
-        State = ConnectionState.Idle;
-        Mode = MultiplayerMode.None;
-        StatusMessage = $"Rejected: {response.Reason}";
-        _log.LogInfo($"Join rejected: {response.Reason}");
-    }
-
-    private void HandleSaveData(byte[] saveBytes)
-    {
-        if (State != ConnectionState.ReceivingSave)
-        {
-            _log.LogWarning($"Received save data ({saveBytes.Length} bytes) but state is {State}, ignoring.");
-            return;
-        }
-
-        // hash check so we know the save isn't corrupted
-        using (var md5 = System.Security.Cryptography.MD5.Create())
-        {
-            var hash = BitConverter.ToString(md5.ComputeHash(saveBytes)).Replace("-", "");
-            _log.LogInfo($"[SAVE-RECV] Save hash (MD5): {hash}, size: {saveBytes.Length}");
-        }
-
-        if (saveBytes.Length == 0)
-        {
-            _log.LogWarning("Received empty save data from host. The host may not have a save file.");
-            StatusMessage = "Warning: host sent empty save. You may need to load a save manually.";
-            ConfirmSaveLoaded();
-            return;
-        }
-
-        _log.LogInfo($"Received save data: {saveBytes.Length} bytes. Writing to disk...");
-        _receivedSaveData = saveBytes;
-        State = ConnectionState.LoadingSave;
-        StatusMessage = $"Received save ({saveBytes.Length / 1024} KB). Loading...";
-
-        var gameName = "Multiplayer";
-        var saveName = $"mp_joined_{DateTime.UtcNow:yyyyMMdd_HHmmss}";
-
-        // write it to disk
-        var saveManager = PluginRuntime.SaveManager;
-        string? writtenPath = saveManager?.WriteSaveFile(saveBytes, saveName, gameName);
-
-        _receivedSavePath = writtenPath;
-
-        if (writtenPath == null)
-        {
-            StatusMessage = "Failed to write save file.";
-            _log.LogError("Could not write received save to disk.");
-            return;
-        }
-
-        // try auto-loading, fingers crossed
-        if (MainCapture.HasMain)
-        {
-            StatusMessage = "Loading save...";
-            _log.LogInfo($"Auto-loading save '{saveName}' (game: '{gameName}') via IMain.LoadGame...");
-            if (MainCapture.TryLoadGame(saveName, gameName))
-            {
-                StatusMessage = "Loading game...";
-                return;
-            }
-
-            _log.LogWarning("Auto-load failed, falling back to manual load.");
-        }
-
-        // auto-load failed, they'll have to do it manually
-        StatusMessage = $"Save written. Load '{saveName}' from the game's load menu, then click Confirm.";
-        _log.LogInfo($"Manual load required: {writtenPath}");
-    }
-
-    // 512 MB — no legit COI save comes close to this
-    private const int MaxSaveSize = 512 * 1024 * 1024;
-
-    private void HandleSaveChunk(byte[] payload)
-    {
-        ProtocolCodec.DecodeSaveChunk(payload, out var chunkIndex, out var totalChunks, out var totalSize, out var chunkData);
-
-        if (chunkIndex == 0)
-        {
-            if (totalSize <= 0 || totalSize > MaxSaveSize || totalChunks <= 0)
-            {
-                _log.LogWarning($"Rejecting save: totalSize={totalSize}, totalChunks={totalChunks} — out of range.");
-                return;
-            }
-
-            _saveChunkBuffer = new byte[totalSize];
-            _saveChunksReceived = 0;
-            _saveChunksExpected = totalChunks;
-            State = ConnectionState.ReceivingSave;
-            StatusMessage = $"Receiving save ({totalSize / 1024} KB)...";
-            _log.LogInfo($"Starting chunked save receive: {totalSize} bytes in {totalChunks} chunks.");
-        }
-
-        if (_saveChunkBuffer == null)
-        {
-            _log.LogWarning("Received save chunk but no buffer initialized.");
-            return;
-        }
-
-        if (chunkIndex < 0 || chunkIndex >= _saveChunksExpected)
-        {
-            _log.LogWarning($"Rejecting chunk with out-of-range index {chunkIndex} (expected 0..{_saveChunksExpected - 1}).");
-            return;
-        }
-
-        long offset = (long)chunkIndex * ProtocolCodec.MaxChunkSize;
-        if (offset + chunkData.Length > _saveChunkBuffer.Length)
-        {
-            _log.LogWarning($"Rejecting chunk {chunkIndex}: write at {offset}+{chunkData.Length} exceeds buffer size {_saveChunkBuffer.Length}.");
-            return;
-        }
-
-        Buffer.BlockCopy(chunkData, 0, _saveChunkBuffer, (int)offset, chunkData.Length);
-        _saveChunksReceived++;
-        StatusMessage = $"Receiving save... ({_saveChunksReceived}/{_saveChunksExpected})";
-        _log.LogDebug($"Received save chunk {chunkIndex + 1}/{totalChunks} ({chunkData.Length} bytes).");
-    }
-
-    private void HandleSaveComplete()
-    {
-        if (_saveChunkBuffer == null || _saveChunksReceived < _saveChunksExpected)
-        {
-            _log.LogWarning($"Save complete signal but only {_saveChunksReceived}/{_saveChunksExpected} chunks received.");
-        }
-
-        _log.LogInfo($"All save chunks received ({_saveChunkBuffer?.Length ?? 0} bytes). Processing...");
-        var saveBytes = _saveChunkBuffer ?? Array.Empty<byte>();
-        _saveChunkBuffer = null;
-        _saveChunksReceived = 0;
-        _saveChunksExpected = 0;
-
-        // hand it off to the normal save handler
-        HandleSaveData(saveBytes);
-    }
-
-    private void HandleClientReady(string senderPeerId)
-    {
-        if (Mode != MultiplayerMode.Host)
-        {
-            return;
-        }
-
-        lock (_pendingPeers) { _pendingPeers.Remove(senderPeerId); }
-        lock (_activePeers) { _activePeers.Add(senderPeerId); }
-
-        _log.LogInfo($"Client '{senderPeerId}' is ready and active.");
-        StatusMessage = $"Hosting — {_activePeers.Count} player(s) connected.";
-
-        PluginRuntime.Chat.AddSystem($"{ResolvePeerName(senderPeerId)} joined the game.");
-        _joinCoordinator?.OnClientReady(senderPeerId);
-        BroadcastPlayerList();
-    }
-
-    private void HandleChatMessage(string senderPeerId, byte[] payload)
-    {
-        var msg = ProtocolCodec.DecodeChatMessage(payload);
-        _log.LogInfo($"HandleChatMessage Mode={Mode}, SenderPeerId='{senderPeerId}', SenderName='{msg.SenderName}', Text='{msg.Text}', Kind={msg.Kind}");
-
-        // host stamps the real sender identity before relaying — don't trust the payload
-        if (Mode == MultiplayerMode.Host && senderPeerId != HostPeerId)
-        {
-            msg.SenderPeerId = senderPeerId;
-            msg.SenderName = ResolvePeerName(senderPeerId);
-            _log.LogInfo($"Server received chat from '{senderPeerId}' ({msg.SenderName}): {msg.Text}");
-
-                if (_pingHandler.TryHandleIncomingChatMessage(senderPeerId, msg))
-            {
-                return;
-            }
-
-            _transport.Broadcast(ProtocolCodec.WrapChatMessage(msg));
-            _log.LogInfo($"Broadcasted chat from '{msg.SenderName}' to clients.");
-        }
-
-        // skip our own messages, already in the log
-        if (string.Equals(msg.SenderPeerId, LocalPeerId, StringComparison.Ordinal))
-        {
-            return;
-        }
-
-        if (_pingHandler.TryHandleIncomingPong(msg))
-        {
-            return;
-        }
-
-        if (msg.Kind == 0)
-        {
-            PluginRuntime.Chat.AddChat(msg.SenderName, msg.Text);
-        }
-        else if (msg.Kind == 2)
-        {
-            PluginRuntime.Chat.AddSimControl(msg.SenderName, msg.Text);
-        }
-        else if (msg.Kind == 3)
-        {
-            PluginRuntime.Chat.AddSystem(msg.Text);
-        }
-        else
-        {
-            PluginRuntime.Chat.AddAction(msg.SenderName, msg.Text);
-        }
-    }
-
-    private void HandlePlayerList(byte[] payload)
-    {
-        var list = ProtocolCodec.DecodePlayerList(payload);
-        lock (_playerList)
-        {
-            _playerList.Clear();
-            _playerList.AddRange(list);
-        }
-    }
-
-    // waypoint ping system
-    public event Action<WaypointPayload>? WaypointReceived;
-
-    private int GetOrAssignColor(string peerId)
-    {
-        lock (_peerColors)
-        {
-            if (!_peerColors.TryGetValue(peerId, out var idx))
-            {
-                idx = _nextColorIndex++;
-                _peerColors[peerId] = idx;
-            }
-            return idx;
-        }
-    }
-
-    /// <summary>
-    /// Host builds the player list from local state and pushes it to all clients.
-    /// Also updates our own _playerList so the host UI stays current.
-    /// </summary>
-    public void BroadcastPlayerList()
-    {
-        if (Mode != MultiplayerMode.Host) return;
-
-        var list = new List<PlayerInfo>();
-
-        // host is always first
-        list.Add(new PlayerInfo
-        {
-            Name = LocalPlayerName,
-            ColorIndex = GetOrAssignColor(LocalPeerId),
-            IsPending = false
-        });
-
-        lock (_activePeers)
-        {
-            foreach (var peer in _activePeers)
-            {
-                list.Add(new PlayerInfo
-                {
-                    Name = ResolvePeerName(peer),
-                    ColorIndex = GetOrAssignColor(peer),
-                    IsPending = false
-                });
-            }
-        }
-
-        lock (_pendingPeers)
-        {
-            foreach (var peer in _pendingPeers)
-            {
-                list.Add(new PlayerInfo
-                {
-                    Name = ResolvePeerName(peer),
-                    ColorIndex = GetOrAssignColor(peer),
-                    IsPending = true
-                });
-            }
-        }
-
-        lock (_playerList)
-        {
-            _playerList.Clear();
-            _playerList.AddRange(list);
-        }
-
-        _transport.Broadcast(ProtocolCodec.WrapPlayerList(list));
-
-        // update lobby metadata so the server browser shows the right count
-        if (_transport is SteamTransport steam)
-            steam.SetLobbyData("players", list.Count.ToString());
-    }
-
-    public void SendWaypoint(float x, float y, float z)
-    {
-        var wp = new WaypointPayload
-        {
-            SenderPeerId = LocalPeerId,
-            SenderName = LocalPlayerName,
-            X = x, Y = y, Z = z,
-            ColorIndex = Mode == MultiplayerMode.Host ? GetOrAssignColor(LocalPeerId) : _localColorIndex
-        };
-
-        var wrapped = ProtocolCodec.WrapWaypoint(wp);
-        if (Mode == MultiplayerMode.Host)
-        {
-            _transport.Broadcast(wrapped);
-        }
-        else
-        {
-            _transport.SendToHost(wrapped);
-        }
-
-        // show it locally too
-        WaypointReceived?.Invoke(wp);
-    }
-
-    private void HandleWaypoint(string senderPeerId, byte[] payload)
-    {
-        var wp = ProtocolCodec.DecodeWaypoint(payload);
-
-        // host stamps sender, assigns color, and relays
-        if (Mode == MultiplayerMode.Host && senderPeerId != HostPeerId)
-        {
-            wp.SenderPeerId = senderPeerId;
-            wp.SenderName = ResolvePeerName(senderPeerId);
-            wp.ColorIndex = GetOrAssignColor(senderPeerId);
-            _transport.Broadcast(ProtocolCodec.WrapWaypoint(wp));
-        }
-
-        // don't double-show our own
-        if (string.Equals(wp.SenderPeerId, LocalPeerId, StringComparison.Ordinal))
-        {
-            return;
-        }
-
-        WaypointReceived?.Invoke(wp);
-    }
-
-    public void SendChatMessage(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return;
-        }
-
-        _log.LogInfo($"SendChatMessage Mode={Mode}, Player='{LocalPlayerName}', Text='{text}'");
-
-        if (_chatCommandHandler.TryHandle(text))
-        {
-            return;
-        }
-
-        var msg = new ChatMessagePayload
-        {
-            SenderName = LocalPlayerName,
-            SenderPeerId = LocalPeerId,
-            Kind = 0,
-            Text = text
-        };
-
-        var wrapped = ProtocolCodec.WrapChatMessage(msg);
-        if (Mode == MultiplayerMode.Host)
-        {
-            _transport.Broadcast(wrapped);
-        }
-        else
-        {
-            _transport.SendToHost(wrapped);
-        }
-
-        PluginRuntime.Chat.AddChat(LocalPlayerName, text);
-        _log.LogInfo($"Broadcasted chat from '{LocalPlayerName}': {text}");
-    }
-
-    public void HandlePingCommand(string text)
-    {
-        _pingHandler.HandlePingCommand(text);
-    }
-
-    public bool WasCommand(string text, string command)
-    {
-        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(command))
-        {
-            return false;
-        }
-
-        var trimmed = text.Trim();
-        var normalized = command.StartsWith("/") ? command : "/" + command;
-        if (!trimmed.StartsWith(normalized, StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        if (trimmed.Length == normalized.Length || char.IsWhiteSpace(trimmed[normalized.Length]))
-        {
-            _observedNativeCommands.Add(normalized);
-            return true;
-        }
-
-        return false;
-    }
-
-    public void ActivateDebugPacketDrop()
-    {
-        _simulateDropNextPacket = true;
-        PluginRuntime.Chat.AddSystem("HICCUP ACTIVE: The next host command will be silently dropped to force a desync.");
-        _log.LogWarning("[DEBUG] Client activated /hiccup command.");
-    }
-
-    public void SendActionLog(string description)
-    {
-        var msg = new ChatMessagePayload
-        {
-            SenderName = LocalPlayerName,
-            SenderPeerId = LocalPeerId,
-            Kind = 1,
-            Text = description
-        };
-
-        var wrapped = ProtocolCodec.WrapChatMessage(msg);
-        if (Mode == MultiplayerMode.Host)
-        {
-            _transport.Broadcast(wrapped);
-        }
-        else
-        {
-            _transport.SendToHost(wrapped);
-        }
-
-        PluginRuntime.Chat.AddAction(LocalPlayerName, description);
-    }
-
-    public void SendSimControlLog(string description)
-    {
-        var msg = new ChatMessagePayload
-        {
-            SenderName = LocalPlayerName,
-            SenderPeerId = LocalPeerId,
-            Kind = 2,
-            Text = description
-        };
-
-        var wrapped = ProtocolCodec.WrapChatMessage(msg);
-        if (Mode == MultiplayerMode.Host)
-        {
-            _transport.Broadcast(wrapped);
-        }
-        else
-        {
-            _transport.SendToHost(wrapped);
-        }
-
-        PluginRuntime.Chat.AddSimControl(LocalPlayerName, description);
-    }
-
-    private string ResolvePeerName(string peerId)
-    {
-        lock (_peerNames)
-        {
-            if (_peerNames.TryGetValue(peerId, out var name))
-            {
-                return name;
-            }
-        }
-
-        try
-        {
-            if (ulong.TryParse(peerId, out var steamIdValue))
-            {
-                var friend = new Steamworks.Friend(new Steamworks.SteamId { Value = steamIdValue });
-                if (!string.IsNullOrEmpty(friend.Name))
-                {
-                    return friend.Name;
-                }
-            }
-        }
-        catch
-        {
-        }
-
-        return peerId;
-    }
-
-    private void HandleGameCommand(string senderPeerId, byte[] payload)
-    {
-        _log.LogInfo($"[GAME-CMD] Received from '{senderPeerId}', payload={payload.Length} bytes, Mode={Mode}, HostPeerId={HostPeerId}");
-
-        var envelope = _codec.Decode(payload);
-        if (!envelope.IsValid)
-        {
-            _log.LogWarning($"[GAME-CMD] Rejected invalid command from '{senderPeerId}'.");
-            return;
-        }
-
-        _log.LogInfo($"[GAME-CMD] Decoded: type='{envelope.CommandType}', issuer='{envelope.IssuerPlayerId}', seq={envelope.Sequence}");
-
-        if (!_seenCommandIds.Add(envelope.CommandId))
-        {
-            _log.LogWarning($"[GAME-CMD] Duplicate CommandId {envelope.CommandId} from '{senderPeerId}' — dropped.");
-            return;
-        }
-
-        if (Mode == MultiplayerMode.Host && senderPeerId != HostPeerId)
-        {
-            if (!string.Equals(envelope.IssuerPlayerId, senderPeerId, StringComparison.Ordinal))
-            {
-                _log.LogWarning($"[GAME-CMD] Rejected command from '{senderPeerId}': IssuerPlayerId '{envelope.IssuerPlayerId}' doesn't match sender.");
-                return;
-            }
-
-            _log.LogInfo($"[GAME-CMD] HOST: Processing client command '{envelope.CommandType}' from '{senderPeerId}' -> reinject + broadcast.");
-            ReceiveReplicatedCommand(envelope);
-            _transport.Broadcast(ProtocolCodec.WrapGameCommand(payload));
-            return;
-        }
-
-        if (Mode == MultiplayerMode.Client && senderPeerId == HostPeerId)
-        {
-            // drop echoes of our own commands, already ran em
-            if (_outboundCommandIds.Remove(envelope.CommandId))
-            {
-                _log.LogInfo($"[GAME-CMD] CLIENT: Dropped echo of own command '{envelope.CommandType}' id={envelope.CommandId} (already executed locally).");
-                if (_pendingCommands.Count > 0 && _pendingCommands.Peek().Envelope.CommandId == envelope.CommandId)
-                {
-                    _pendingCommands.Dequeue();
-                }
-                return;
-            }
-
-            if (_simulateDropNextPacket)
-            {
-                _simulateDropNextPacket = false;
-                _log.LogError($"[DEBUG] Silently dropping host command '{envelope.CommandType}' (seq {envelope.Sequence}) to simulate network loss!");
-                PluginRuntime.Chat.AddSystem($"Dropped packet: seq {envelope.Sequence}");
-                return;
-            }
-
-            if (!IsJoinSyncActive && _lastProcessedHostSequence >= 0 && envelope.Sequence != _lastProcessedHostSequence + 1)
-            {
-                var expected = _lastProcessedHostSequence + 1;
-                _log.LogWarning($"[SEQ-GAP] Expected seq {expected}, got {envelope.Sequence} — {envelope.Sequence - expected} command(s) lost.");
-                if (DesyncState == DesyncState.None)
-                    DesyncState = DesyncState.SequenceGap;
-                OnSequenceGap(expected, envelope.Sequence);
-            }
-            _lastProcessedHostSequence = envelope.Sequence;
-
-            _log.LogInfo($"[GAME-CMD] CLIENT: Received host command '{envelope.CommandType}' seq={envelope.Sequence} -> reinject.");
-            ReceiveReplicatedCommand(envelope);
-
-            if (_pendingHostChecksums.TryGetValue(envelope.Sequence, out var hostChecksum))
-            {
-                _pendingHostChecksums.Remove(envelope.Sequence);
-                var localChecksum = CalculateLocalChecksum();
-                if (localChecksum != hostChecksum)
-                {
-                    _log.LogError($"[DESYNC] Sequence {envelope.Sequence}: Host Hash={hostChecksum}, Local Hash={localChecksum}");
-                    RequestMajorResync();
-                }
-            }
-
-            return;
-        }
-
-        _log.LogWarning($"[GAME-CMD] UNHANDLED: sender='{senderPeerId}', mode={Mode}, hostPeer='{HostPeerId}' — command dropped!");
-    }
-
-    private void HandleStateChecksum(byte[] payload)
-    {
-        if (Mode != MultiplayerMode.Client)
-        {
-            return;
-        }
-
-        var checksumData = ProtocolCodec.DecodeStateChecksum(payload);
-        _pendingHostChecksums[checksumData.Sequence] = checksumData.Checksum;
-    }
-
-    private int CalculateLocalChecksum()
-    {
-        var scheduler = PluginRuntime.Scheduler;
-        if (scheduler == null)
-        {
-            return 0;
-        }
-
-        // Basic state fingerprint using scheduler queue counts and pending replicated work.
-        // TODO: Replace with a more meaningful model-specific hash of simulation state.
-        var hash = 17;
-        var fields = typeof(Mafi.Core.Input.InputScheduler).GetFields(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        foreach (var field in fields)
-        {
-            try
-            {
-                var value = field.GetValue(scheduler);
-                if (value is System.Collections.ICollection collection)
-                {
-                    hash = hash * 31 + collection.Count;
-                }
-                else if (value is System.Collections.IEnumerable enumerable)
-                {
-                    var count = 0;
-                    foreach (var _ in enumerable) count++;
-                    hash = hash * 31 + count;
-                }
-            }
-            catch
-            {
-                // ignore reflection failures
-            }
-        }
-
-        hash = hash * 31 + PluginRuntime.PendingReplicatedCount;
-
-        var probe = GameStateProbe;
-        if (probe != null)
-        {
-            try { hash = hash * 31 + probe(); }
-            catch { }
-        }
-
-        return hash;
-    }
-
-    public void TickMinorResync()
-    {
-        if (!_minorResyncInFlight) return;
-        if ((DateTime.UtcNow - _minorResyncRequestTime).TotalSeconds < 5.0) return;
-
-        _log.LogWarning("[MINOR-RESYNC] Timed out waiting for response — escalating to major resync.");
-        _minorResyncInFlight = false;
-        RequestMajorResync();
-    }
-
-    public void TickChecksums()
-    {
-        if (Mode != MultiplayerMode.Host)
-            return;
-
-        _checksumTickCounter++;
-        if (_checksumTickCounter % 100 != 0)
-            return;
-
-        var checksumPayload = new StateChecksumPayload
-        {
-            Sequence = _nextSequence,
-            Checksum = CalculateLocalChecksum()
-        };
-        _transport.Broadcast(ProtocolCodec.WrapStateChecksum(checksumPayload));
-    }
-
-    private void OnSequenceGap(long expected, long received)
-    {
-        var missed = received - expected;
-        _log.LogWarning($"[MINOR-RESYNC] Sequence gap {expected}..{received - 1} ({missed} command(s) missing).");
-
-        if (_minorResyncInFlight)
-        {
-            _log.LogInfo("[MINOR-RESYNC] Request already in flight — skipping duplicate.");
-            return;
-        }
-
-        _minorResyncInFlight = true;
-        _minorResyncRequestTime = DateTime.UtcNow;
-
-        var request = new MinorResyncRequestPayload { LastProcessedSequence = expected - 1 };
-        _transport.SendToHost(ProtocolCodec.WrapMinorResyncRequest(request));
-
-        PluginRuntime.Chat.AddSystem($"Catching up: requesting {missed} missed command(s) from host...");
-        _log.LogInfo($"[MINOR-RESYNC] Sent MinorResyncRequest(lastProcessed={expected - 1}) to host.");
-    }
-
-    private void RequestMajorResync()
-    {
-        if (DesyncState == DesyncState.SimulationDesync)
-            return;  // already in flight
-
-        DesyncState = DesyncState.SimulationDesync;
-        StatusMessage = "Simulation desync detected — requesting full resync...";
-
-        // flush all in-flight state before the incoming save overwrites everything
-        _pendingCommands.Clear();
-        _outboundCommandIds.Clear();
-        _seenCommandIds.Clear();
-        _pendingHostChecksums.Clear();
-        _lastProcessedHostSequence = -1;
-        _minorResyncInFlight = false;
-        PluginRuntime.DrainReplicated();
-
-        _transport.SendToHost(ProtocolCodec.WrapMajorResyncRequest());
-        _log.LogError("[MAJOR-RESYNC] Simulation desync detected — requesting full save resync from host.");
-        PluginRuntime.Chat.AddSystem("Simulation desync detected. Requesting full resync from host...");
-    }
-
-    private void HandleMinorResyncRequest(string senderPeerId, byte[] payload)
-    {
-        if (Mode != MultiplayerMode.Host) return;
-
-        var request = ProtocolCodec.DecodeMinorResyncRequest(payload);
-        var fromSeq = request.LastProcessedSequence + 1;
-        _log.LogInfo($"[MINOR-RESYNC] Request from '{senderPeerId}': replay from seq={fromSeq}.");
-
-        var oldest = _commandHistory.OldestSequence;
-        if (_commandHistory.Count == 0 || oldest == null || oldest.Value > fromSeq)
-        {
-            _log.LogWarning($"[MINOR-RESYNC] Cannot fulfil: oldest recorded seq={oldest?.ToString() ?? "none"}, requested seq={fromSeq}. Sending FullResyncRequired.");
-            var fallback = new MinorResyncResponsePayload { FullResyncRequired = true };
-            _transport.SendToClient(senderPeerId, ProtocolCodec.WrapMinorResyncResponse(fallback));
-            return;
-        }
-
-        var commands = _commandHistory.GetSince(fromSeq);
-        _log.LogInfo($"[MINOR-RESYNC] Replaying {commands.Count} command(s) to '{senderPeerId}'.");
-        PluginRuntime.Chat.AddSystem($"Catching up {ResolvePeerName(senderPeerId)}: replaying {commands.Count} missed command(s).");
-
-        var response = new MinorResyncResponsePayload { Commands = commands };
-        var encoded = ProtocolCodec.WrapMinorResyncResponse(response);
-
-        if (encoded.Length > ProtocolCodec.MaxChunkSize)
-        {
-            _log.LogWarning($"[MINOR-RESYNC] Batch too large ({encoded.Length} bytes) — sending FullResyncRequired.");
-            var fallback = new MinorResyncResponsePayload { FullResyncRequired = true };
-            _transport.SendToClient(senderPeerId, ProtocolCodec.WrapMinorResyncResponse(fallback));
-            return;
-        }
-
-        _transport.SendToClient(senderPeerId, encoded);
-    }
-
-    private void HandleMinorResyncResponse(byte[] payload)
-    {
-        if (Mode != MultiplayerMode.Client) return;
-
-        _minorResyncInFlight = false;
-
-        var response = ProtocolCodec.DecodeMinorResyncResponse(payload);
-
-        if (response.FullResyncRequired)
-        {
-            _log.LogWarning("[MINOR-RESYNC] Host cannot fulfil catch-up — escalating to major resync.");
-            RequestMajorResync();
-            return;
-        }
-
-        _log.LogInfo($"[MINOR-RESYNC] Applying {response.Commands.Count} replayed command(s).");
-
-        foreach (var envelope in response.Commands.OrderBy(e => e.Sequence))
-        {
-            // skip duplicates — may already be in _seenCommandIds if the echo arrived late
-            if (!_seenCommandIds.Add(envelope.CommandId))
-            {
-                _log.LogInfo($"[MINOR-RESYNC] Skipping already-seen envelope seq={envelope.Sequence}.");
-                _lastProcessedHostSequence = envelope.Sequence;
-                continue;
-            }
-
-            // skip our own optimistically-executed commands
-            if (_outboundCommandIds.Remove(envelope.CommandId))
-            {
-                _log.LogInfo($"[MINOR-RESYNC] seq={envelope.Sequence} was our own optimistic command — skipping reinject.");
-                _lastProcessedHostSequence = envelope.Sequence;
-                continue;
-            }
-
-            ReceiveReplicatedCommand(envelope);
-            _lastProcessedHostSequence = envelope.Sequence;
-        }
-
-        if (DesyncState == DesyncState.SequenceGap)
-        {
-            DesyncState = DesyncState.None;
-            _log.LogInfo("[MINOR-RESYNC] Catch-up complete — desync state cleared.");
-            PluginRuntime.Chat.AddSystem("Packet loss recovered.");
-        }
-    }
-
-    private void HandleMajorResyncRequest(string senderPeerId)
-    {
-        if (Mode != MultiplayerMode.Host || _joinCoordinator == null) return;
-
-        var playerName = ResolvePeerName(senderPeerId);
-        _log.LogWarning($"[MAJOR-RESYNC] '{playerName}' ({senderPeerId}) requested full resync.");
-
-        // move back to pending so HandleClientReady transitions correctly
-        lock (_activePeers) { _activePeers.Remove(senderPeerId); }
-        lock (_pendingPeers) { _pendingPeers.Add(senderPeerId); }
-
-        PluginRuntime.Chat.AddSystem($"Resyncing {playerName} — saving and transferring world data...");
-        _joinCoordinator.BeginJoin(senderPeerId, playerName);
-    }
+    // ── Disconnection ─────────────────────────────────────────────────────────
 
     // fired when someone drops — could be a client (if we're host) or the host (if we're client)
     private void OnClientDisconnected(string peerId)
@@ -1451,16 +342,5 @@ internal sealed class MultiplayerSession : IDisposable
 
         if (Mode == MultiplayerMode.Host)
             BroadcastPlayerList();
-    }
-
-    public void TickJoinCoordinator()
-    {
-        _joinCoordinator?.Tick();
-    }
-
-    public void Dispose()
-    {
-        _transport.MessageReceived -= OnTransportMessageReceived;
-        _transport.ClientDisconnected -= OnClientDisconnected;
     }
 }

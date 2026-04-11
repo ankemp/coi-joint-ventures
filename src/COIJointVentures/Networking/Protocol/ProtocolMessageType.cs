@@ -26,4 +26,8 @@ internal enum ProtocolMessageType : byte
     MinorResyncRequest = 0x40,
     MinorResyncResponse = 0x41,
     MajorResyncRequest = 0x42,
+
+    // Large command chunking (client → host)
+    CommandChunkStart = 0x50,
+    CommandChunk = 0x51,
 }

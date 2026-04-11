@@ -11,7 +11,6 @@ using HarmonyLib;
 using System;
 using System.IO;
 using System.Reflection;
-using Mafi.Core.Input;
 using UnityEngine;
 
 namespace COIJointVentures;
@@ -68,6 +67,8 @@ public sealed class Plugin : BaseUnityPlugin
 
             _harmony = new Harmony(PluginGuid);
             MainCapture.TryApplyPatch(_harmony, Logger);
+
+            MultiplayerSession.GameStateProbe = CoiReflection.ComputeSimHash;
 
             var processCommandsMethod = CoiReflection.FindInputSchedulerProcessCommandsMethod();
             if (processCommandsMethod != null)
@@ -199,6 +200,8 @@ public sealed class Plugin : BaseUnityPlugin
         _bootstrap?.PollTransport();
         _bootstrap?.Session.TickChecksums();
         _bootstrap?.Session.TickMinorResync();
+        _bootstrap?.Session.TickPendingAcks();
+        _bootstrap?.Session.TickCommandChunks();
 
         if (_bootstrap != null)
         {
