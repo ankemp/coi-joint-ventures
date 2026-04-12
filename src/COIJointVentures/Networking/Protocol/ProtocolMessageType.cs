@@ -15,6 +15,7 @@ internal enum ProtocolMessageType : byte
 
     // Gameplay / state
     GameCommand = 0x10,
+    BatchedCommands = 0x11,   // multiple CommandEnvelopes packed into one message (client → host)
     StateChecksum = 0x15,
 
     // Social / world

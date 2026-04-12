@@ -79,6 +79,13 @@ public sealed class Plugin : BaseUnityPlugin
                     _harmony.Patch(processCommandsMethod, prefix: new HarmonyMethod(prefix));
                     Logger.LogInfo("Applied Harmony prefix patch to InputScheduler.ProcessCommands.");
                 }
+
+                var postfix = typeof(CommandInterceptionPatch).GetMethod("Postfix", BindingFlags.Static | BindingFlags.NonPublic);
+                if (postfix != null)
+                {
+                    _harmony.Patch(processCommandsMethod, postfix: new HarmonyMethod(postfix));
+                    Logger.LogInfo("Applied Harmony postfix patch to InputScheduler.ProcessCommands (batch flush).");
+                }
             }
 
             InitUI();

@@ -88,6 +88,7 @@ internal sealed partial class MultiplayerSession
         _seenCommandIds.Clear();
         _pendingHostChecksums.Clear();
         _pendingAcks.Clear();
+        _frameBuffer.Clear();
         _lastProcessedHostSequence = -1;
         _minorResyncInFlight = false;
         PluginRuntime.DrainReplicated();

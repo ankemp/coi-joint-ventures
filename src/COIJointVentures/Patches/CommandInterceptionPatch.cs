@@ -228,4 +228,11 @@ internal static class CommandInterceptionPatch
         }
         return false;
     }
+
+    // Called by Harmony after the ProcessCommands body completes.
+    // All commands generated during this tick have now been observed and buffered — flush to host.
+    private static void Postfix(InputScheduler __instance)
+    {
+        PluginRuntime.Session?.FlushFrameBuffer();
+    }
 }

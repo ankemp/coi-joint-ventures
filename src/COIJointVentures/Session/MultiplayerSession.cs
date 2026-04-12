@@ -65,6 +65,7 @@ internal sealed partial class MultiplayerSession : IDisposable
     private readonly Dictionary<Guid, PendingAck> _pendingAcks = new();
     private readonly Dictionary<Guid, CommandReassemblyBuffer> _commandChunkBuffers = new();
     private readonly HashSet<string> _observedNativeCommands = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<(Guid CommandId, byte[] EncodedPayload)> _frameBuffer = new();  // per-tick batch accumulator (client only)
     private long _nextSequence;
     private bool _simulateDropNextPacket;
     private const double AckTimeoutSeconds = 3.0;
@@ -286,6 +287,9 @@ internal sealed partial class MultiplayerSession : IDisposable
                 break;
             case ProtocolMessageType.GameCommand:
                 HandleGameCommand(message.SenderPeerId, payload);
+                break;
+            case ProtocolMessageType.BatchedCommands:
+                HandleBatchedCommands(message.SenderPeerId, payload);
                 break;
             case ProtocolMessageType.PlayerList:
                 HandlePlayerList(payload);

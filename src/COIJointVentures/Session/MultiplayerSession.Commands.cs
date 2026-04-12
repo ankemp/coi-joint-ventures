@@ -34,7 +34,13 @@ internal sealed partial class MultiplayerSession
         // encode once — used for ACK tracking and (possibly chunked) transmission
         var encodedPayload = _codec.Encode(envelope);
         _pendingAcks[envelope.CommandId] = new PendingAck { SentAt = DateTime.UtcNow, EncodedPayload = encodedPayload };
-        TransmitCommandToHost(envelope.CommandId, encodedPayload);
+
+        // Large commands bypass batching and go immediately via the chunked path.
+        // Normal commands are deferred to the end-of-tick flush.
+        if (encodedPayload.Length > ProtocolCodec.MaxCommandChunkDataSize)
+            TransmitCommandToHost(envelope.CommandId, encodedPayload);
+        else
+            _frameBuffer.Add((envelope.CommandId, encodedPayload));
     }
 
     public bool ShouldReplicateCommand(NativeCommandInfo command)
@@ -183,6 +189,75 @@ internal sealed partial class MultiplayerSession
         }
 
         _log.LogWarning($"[GAME-CMD] UNHANDLED: sender='{senderPeerId}', mode={Mode}, hostPeer='{HostPeerId}' — command dropped!");
+    }
+
+    /// <summary>
+    /// Called by CommandInterceptionPatch.Postfix after each InputScheduler.ProcessCommands tick.
+    /// Sends all buffered client commands as a single BatchedCommands message (or individual
+    /// GameCommand messages if only one command was queued). Large commands were already sent
+    /// immediately via the chunked path and are not in this buffer.
+    /// </summary>
+    public void FlushFrameBuffer()
+    {
+        if (Mode != MultiplayerMode.Client || _frameBuffer.Count == 0) return;
+
+        try
+        {
+            if (_frameBuffer.Count == 1)
+            {
+                // single command — keep on the established GameCommand path so older peers
+                // that don't know BatchedCommands can still receive it
+                _transport.SendToHost(ProtocolCodec.WrapGameCommand(_frameBuffer[0].EncodedPayload));
+            }
+            else
+            {
+                // pack into one (or more) BatchedCommands messages, capped at MaxChunkSize each
+                var batch = new List<byte[]>(_frameBuffer.Count);
+                int batchBytes = 4; // 4-byte count field
+
+                foreach (var (_, payload) in _frameBuffer)
+                {
+                    int entrySize = 4 + payload.Length;
+                    if (batchBytes + entrySize > ProtocolCodec.MaxChunkSize && batch.Count > 0)
+                    {
+                        // current batch would exceed transport limit — flush and start a new one
+                        _transport.SendToHost(ProtocolCodec.WrapBatchedCommands(batch));
+                        _log.LogInfo($"[BATCH] Flushed partial batch of {batch.Count} command(s) ({batchBytes} bytes).");
+                        batch = new List<byte[]>(_frameBuffer.Count);
+                        batchBytes = 4;
+                    }
+                    batch.Add(payload);
+                    batchBytes += entrySize;
+                }
+
+                if (batch.Count > 0)
+                {
+                    _transport.SendToHost(ProtocolCodec.WrapBatchedCommands(batch));
+                    _log.LogInfo($"[BATCH] Flushed batch of {batch.Count} command(s) ({batchBytes} bytes).");
+                }
+            }
+        }
+        finally
+        {
+            // Always clear — if SendToHost throws the ACK retry path will re-send
+            // and the host's _seenCommandIds dedup will drop the duplicate.
+            _frameBuffer.Clear();
+        }
+    }
+
+    private void HandleBatchedCommands(string senderPeerId, byte[] payload)
+    {
+        // Batched messages only come from clients → host
+        if (Mode != MultiplayerMode.Host)
+        {
+            _log.LogWarning($"[BATCH] Received BatchedCommands from '{senderPeerId}' but we are not host — ignoring.");
+            return;
+        }
+
+        var payloads = ProtocolCodec.DecodeBatchedCommands(payload);
+        _log.LogInfo($"[BATCH] Received batch of {payloads.Count} command(s) from '{senderPeerId}'.");
+        foreach (var commandPayload in payloads)
+            HandleGameCommand(senderPeerId, commandPayload);
     }
 
     private void TransmitCommandToHost(Guid commandId, byte[] encodedPayload)

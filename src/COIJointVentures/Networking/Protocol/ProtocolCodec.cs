@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.Serialization.Json;
 
@@ -9,6 +10,40 @@ internal static class ProtocolCodec
     public static byte[] WrapGameCommand(byte[] commandPayload)
     {
         return Wrap(ProtocolMessageType.GameCommand, commandPayload);
+    }
+
+    // BatchedCommands: [count:4][len0:4][data0...][len1:4][data1...]...
+    // Each data element is the encoded CommandEnvelope payload (same bytes as a GameCommand payload).
+    public static byte[] WrapBatchedCommands(List<byte[]> encodedPayloads)
+    {
+        int totalSize = 4; // count
+        foreach (var p in encodedPayloads)
+            totalSize += 4 + p.Length;
+
+        var body = new byte[totalSize];
+        int pos = 0;
+        Buffer.BlockCopy(BitConverter.GetBytes(encodedPayloads.Count), 0, body, pos, 4); pos += 4;
+        foreach (var p in encodedPayloads)
+        {
+            Buffer.BlockCopy(BitConverter.GetBytes(p.Length), 0, body, pos, 4); pos += 4;
+            Buffer.BlockCopy(p, 0, body, pos, p.Length); pos += p.Length;
+        }
+        return Wrap(ProtocolMessageType.BatchedCommands, body);
+    }
+
+    public static List<byte[]> DecodeBatchedCommands(byte[] payload)
+    {
+        int count = BitConverter.ToInt32(payload, 0);
+        var result = new List<byte[]>(count);
+        int pos = 4;
+        for (int i = 0; i < count; i++)
+        {
+            int len = BitConverter.ToInt32(payload, pos); pos += 4;
+            var data = new byte[len];
+            Buffer.BlockCopy(payload, pos, data, 0, len); pos += len;
+            result.Add(data);
+        }
+        return result;
     }
 
     public static byte[] WrapStateChecksum(StateChecksumPayload payload)
