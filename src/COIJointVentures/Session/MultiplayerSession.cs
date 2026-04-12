@@ -17,7 +17,7 @@ internal sealed partial class MultiplayerSession : IDisposable
     private readonly ICommandCodec _codec;
     private readonly INetworkTransport _transport;
     private readonly ChatCommandHandler _chatCommandHandler;
-    private readonly PingHandler _pingHandler;
+    private readonly LatencyTracker _latencyTracker;
 
     // ── Session identity ──────────────────────────────────────────────────────
     public MultiplayerMode Mode { get; private set; }
@@ -94,7 +94,7 @@ internal sealed partial class MultiplayerSession : IDisposable
         _codec = codec;
         _transport = transport;
         _chatCommandHandler = new ChatCommandHandler(this, _log);
-        _pingHandler = new PingHandler(this, _transport, _log);
+        _latencyTracker = new LatencyTracker(this, _transport, _log);
         _transport.MessageReceived += OnTransportMessageReceived;
         _transport.ClientDisconnected += OnClientDisconnected;
     }
@@ -222,6 +222,12 @@ internal sealed partial class MultiplayerSession : IDisposable
         _joinCoordinator?.Tick();
     }
 
+    public void TickLatencyTracker()
+    {
+        if (_latencyTracker.Tick())
+            BroadcastPlayerList();
+    }
+
     // ── Message dispatch ──────────────────────────────────────────────────────
 
     private void OnTransportMessageReceived(TransportMessage message)
@@ -311,6 +317,13 @@ internal sealed partial class MultiplayerSession : IDisposable
                 break;
             case ProtocolMessageType.CommandChunk:
                 HandleCommandChunk(message.SenderPeerId, payload);
+                break;
+            case ProtocolMessageType.PingRequest:
+                _latencyTracker.HandlePingRequest(ProtocolCodec.DecodePing(payload));
+                break;
+            case ProtocolMessageType.PingResponse:
+                if (_latencyTracker.HandlePingResponse(ProtocolCodec.DecodePing(payload)))
+                    BroadcastPlayerList();
                 break;
             default:
                 _log.LogWarning($"Unknown protocol message type: {(byte)msgType} from '{message.SenderPeerId}'.");

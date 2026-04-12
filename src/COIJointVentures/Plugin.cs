@@ -209,6 +209,7 @@ public sealed class Plugin : BaseUnityPlugin
         _bootstrap?.Session.TickMinorResync();
         _bootstrap?.Session.TickPendingAcks();
         _bootstrap?.Session.TickCommandChunks();
+        _bootstrap?.Session.TickLatencyTracker();
 
         if (_bootstrap != null)
         {

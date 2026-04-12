@@ -31,4 +31,8 @@ internal enum ProtocolMessageType : byte
     // Large command chunking (client → host)
     CommandChunkStart = 0x50,
     CommandChunk = 0x51,
+
+    // Latency measurement (host ↔ client)
+    PingRequest = 0x52,
+    PingResponse = 0x53,
 }

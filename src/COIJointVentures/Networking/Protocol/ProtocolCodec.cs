@@ -136,12 +136,12 @@ internal static class ProtocolCodec
 
     public static byte[] WrapPlayerList(System.Collections.Generic.List<Session.PlayerInfo> players)
     {
-        // simple text format: name\tcolorIndex\tisPending per line
+        // text format: name\tcolorIndex\tisPending\tlatencyMs per line
         var sb = new System.Text.StringBuilder();
         foreach (var p in players)
         {
             if (sb.Length > 0) sb.Append('\n');
-            sb.Append(p.Name).Append('\t').Append(p.ColorIndex).Append('\t').Append(p.IsPending ? '1' : '0');
+            sb.Append(p.Name).Append('\t').Append(p.ColorIndex).Append('\t').Append(p.IsPending ? '1' : '0').Append('\t').Append(p.LatencyMs);
         }
         return Wrap(ProtocolMessageType.PlayerList, System.Text.Encoding.UTF8.GetBytes(sb.ToString()));
     }
@@ -159,7 +159,8 @@ internal static class ProtocolCodec
             {
                 Name = parts[0],
                 ColorIndex = int.TryParse(parts[1], out var c) ? c : 0,
-                IsPending = parts[2] == "1"
+                IsPending = parts[2] == "1",
+                LatencyMs = parts.Length >= 4 && int.TryParse(parts[3], out var ms) ? ms : -1
             });
         }
         return list;
@@ -278,6 +279,21 @@ internal static class ProtocolCodec
     public static JoinResponse DecodeJoinResponse(byte[] payload)
     {
         return DeserializeJson<JoinResponse>(payload);
+    }
+
+    public static byte[] WrapPingRequest(PingPayload payload)
+    {
+        return Wrap(ProtocolMessageType.PingRequest, SerializeJson(payload));
+    }
+
+    public static byte[] WrapPingResponse(PingPayload payload)
+    {
+        return Wrap(ProtocolMessageType.PingResponse, SerializeJson(payload));
+    }
+
+    public static PingPayload DecodePing(byte[] payload)
+    {
+        return DeserializeJson<PingPayload>(payload);
     }
 
     private static byte[] Wrap(ProtocolMessageType type, byte[] payload)

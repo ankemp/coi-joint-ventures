@@ -100,22 +100,12 @@ internal sealed partial class MultiplayerSession
             msg.SenderName = ResolvePeerName(senderPeerId);
             _log.LogInfo($"Server received chat from '{senderPeerId}' ({msg.SenderName}): {msg.Text}");
 
-            if (_pingHandler.TryHandleIncomingChatMessage(senderPeerId, msg))
-            {
-                return;
-            }
-
             _transport.Broadcast(ProtocolCodec.WrapChatMessage(msg));
             _log.LogInfo($"Broadcasted chat from '{msg.SenderName}' to clients.");
         }
 
         // skip our own messages, already in the log
         if (string.Equals(msg.SenderPeerId, LocalPeerId, StringComparison.Ordinal))
-        {
-            return;
-        }
-
-        if (_pingHandler.TryHandleIncomingPong(msg))
         {
             return;
         }
@@ -140,7 +130,7 @@ internal sealed partial class MultiplayerSession
 
     public void HandlePingCommand(string text)
     {
-        _pingHandler.HandlePingCommand(text);
+        _latencyTracker.HandlePingCommand();
     }
 
     public bool WasCommand(string text, string command)

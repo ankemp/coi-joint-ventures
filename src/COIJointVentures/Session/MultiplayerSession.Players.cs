@@ -111,7 +111,8 @@ internal sealed partial class MultiplayerSession
                 {
                     Name = ResolvePeerName(peer),
                     ColorIndex = GetOrAssignColor(peer),
-                    IsPending = false
+                    IsPending = false,
+                    LatencyMs = _latencyTracker.GetLatency(peer)
                 });
             }
         }
@@ -124,7 +125,8 @@ internal sealed partial class MultiplayerSession
                 {
                     Name = ResolvePeerName(peer),
                     ColorIndex = GetOrAssignColor(peer),
-                    IsPending = true
+                    IsPending = true,
+                    LatencyMs = -1
                 });
             }
         }

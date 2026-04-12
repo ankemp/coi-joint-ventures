@@ -251,7 +251,8 @@ internal sealed class MainPanelUI
             Plugin.LogInstance.LogInfo($"[UI] Host button clicked. IsInGame={MainCapture.IsInGame}, IsSchedulerActive={PluginRuntime.IsSchedulerActive}, Scheduler={PluginRuntime.Scheduler != null}");
             if (MainCapture.IsInGame) ShowHostSetup();
             else Plugin.LogInstance.LogInfo("[UI] Host button blocked — not in game.");
-        }) { text = "Host Game" };
+        })
+        { text = "Host Game" };
         hostBtn.style.height = 32;
         hostBtn.style.marginBottom = 6;
         hostBtn.style.fontSize = 13;
@@ -628,10 +629,55 @@ internal sealed class MainPanelUI
         {
             var color = GetPeerColor(player.ColorIndex);
             var suffix = player.IsPending ? " (joining...)" : "";
-            var lbl = new Label($"  \u25CF {player.Name}{suffix}");
-            lbl.style.fontSize = 12;
-            lbl.style.color = color;
-            container.Add(lbl);
+
+            var row = new VisualElement();
+            row.style.flexDirection = FlexDirection.Row;
+            row.style.alignItems = Align.Center;
+
+            var nameLbl = new Label($"  \u25CF {player.Name}{suffix}");
+            nameLbl.style.fontSize = 12;
+            nameLbl.style.color = color;
+            nameLbl.style.flexGrow = 1;
+            row.Add(nameLbl);
+
+            if (!player.IsPending)
+            {
+                string latencyText;
+                Color latencyColor;
+                if (player.LatencyMs < 0)
+                {
+                    latencyText = "--";
+                    latencyColor = new Color(0.5f, 0.5f, 0.5f);
+                }
+                else if (player.LatencyMs == 0)
+                {
+                    latencyText = "local";
+                    latencyColor = new Color(0.5f, 0.5f, 0.5f);
+                }
+                else if (player.LatencyMs < 80)
+                {
+                    latencyText = $"{player.LatencyMs}ms";
+                    latencyColor = new Color(0.3f, 0.9f, 0.4f);  // green
+                }
+                else if (player.LatencyMs < 200)
+                {
+                    latencyText = $"{player.LatencyMs}ms";
+                    latencyColor = new Color(1.0f, 0.75f, 0.2f); // yellow
+                }
+                else
+                {
+                    latencyText = $"{player.LatencyMs}ms";
+                    latencyColor = new Color(1.0f, 0.35f, 0.3f); // red
+                }
+
+                var latencyLbl = new Label(latencyText);
+                latencyLbl.style.fontSize = 11;
+                latencyLbl.style.color = latencyColor;
+                latencyLbl.style.marginRight = 2;
+                row.Add(latencyLbl);
+            }
+
+            container.Add(row);
         }
     }
 
