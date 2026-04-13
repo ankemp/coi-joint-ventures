@@ -221,6 +221,14 @@ internal sealed class ServerBrowserUI
         _passwordField.isPasswordField = true;
         _passwordField.style.width = 160;
         UIHelpers.StyleTextField(_passwordField);
+        _passwordField.RegisterCallback<KeyDownEvent>(evt =>
+        {
+            if (evt.keyCode == KeyCode.Return || evt.keyCode == KeyCode.KeypadEnter)
+            {
+                evt.StopPropagation();
+                OnConnect();
+            }
+        });
         _passwordRow.Add(_passwordField);
 
         connectRow.Add(_passwordRow);
@@ -279,6 +287,14 @@ internal sealed class ServerBrowserUI
         _lanPortField = MakeLabeledField(lanBox, "Port:", "38455");
         _lanPasswordField = MakeLabeledField(lanBox, "Password:", "");
         _lanPasswordField.isPasswordField = true;
+        _lanPasswordField.RegisterCallback<KeyDownEvent>(evt =>
+        {
+            if (evt.keyCode == KeyCode.Return || evt.keyCode == KeyCode.KeypadEnter)
+            {
+                evt.StopPropagation();
+                OnJoinLanClick();
+            }
+        });
 
         var lanBtnRow = new VisualElement();
         lanBtnRow.style.flexDirection = FlexDirection.Row;
@@ -335,6 +351,14 @@ internal sealed class ServerBrowserUI
         _codeField = MakeLabeledField(box, "Lobby Code:", "");
         _codePasswordField = MakeLabeledField(box, "Password:", "");
         _codePasswordField.isPasswordField = true;
+        _codePasswordField.RegisterCallback<KeyDownEvent>(evt =>
+        {
+            if (evt.keyCode == KeyCode.Return || evt.keyCode == KeyCode.KeypadEnter)
+            {
+                evt.StopPropagation();
+                OnJoinCodeClick();
+            }
+        });
 
         var btnRow = new VisualElement();
         btnRow.style.flexDirection = FlexDirection.Row;
