@@ -74,6 +74,19 @@ internal sealed partial class MultiplayerSession
         RequestMajorResync();
     }
 
+    public void RequestManualResync()
+    {
+        if (Mode != MultiplayerMode.Client)
+        {
+            PluginRuntime.Chat.AddSystem("The /resync command is only available to clients.");
+            return;
+        }
+
+        _log.LogInfo("[MANUAL-RESYNC] Player requested a manual full resync.");
+        PluginRuntime.Chat.AddSystem("Requesting full resync from host...");
+        RequestMajorResync();
+    }
+
     private void RequestMajorResync()
     {
         if (DesyncState == DesyncState.SimulationDesync)

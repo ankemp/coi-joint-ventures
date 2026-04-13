@@ -308,10 +308,13 @@ internal static class MainCapture
     }
 
     // blocks clients from loading a different save while connected to a server
+    // (but allows resync saves through — DesyncState.SimulationDesync means
+    // we requested a full resync and the incoming save is intentional)
     private static bool OnLoadGamePrefix()
     {
         var session = Runtime.PluginRuntime.Session;
-        if (session != null && session.Mode == Session.MultiplayerMode.Client)
+        if (session != null && session.Mode == Session.MultiplayerMode.Client
+            && session.DesyncState != Session.DesyncState.SimulationDesync)
         {
             _log?.LogWarning("Blocked save load — you're connected to a multiplayer session. Disconnect first.");
             return false; // skip the original method

@@ -37,6 +37,10 @@ internal sealed class ChatCommandHandler
                 HandlePing(text);
                 return true;
 
+            case "/resync":
+                HandleResync();
+                return true;
+
             default:
                 return false;
         }
@@ -77,5 +81,11 @@ internal sealed class ChatCommandHandler
     private void HandlePing(string text)
     {
         _session.HandlePingCommand(text);
+    }
+
+    private void HandleResync()
+    {
+        _log.LogInfo("Executed /resync command.");
+        _session.RequestManualResync();
     }
 }

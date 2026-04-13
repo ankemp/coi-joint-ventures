@@ -11,7 +11,8 @@ internal static class ChatCommandRegistry
         {
             ["/help"] = new("/help", "Show available chat commands", "/help"),
             ["/ping"] = new("/ping", "Ping the host and receive a response", "/ping"),
-            ["/hiccup"] = new("/hiccup", "Drop the next host command to simulate a desync", "/hiccup")
+            ["/hiccup"] = new("/hiccup", "Drop the next host command to simulate a desync", "/hiccup"),
+            ["/resync"] = new("/resync", "Request a full resync from the host (client only)", "/resync")
         };
 
     public static bool TryParse(string text, out ChatCommandInfo command)
