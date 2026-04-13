@@ -5,16 +5,15 @@ namespace JointVentures.Launcher;
 
 /// <summary>
 /// Extracts the embedded plugin ZIP to a local cache directory.
-/// Re-extracts when the launcher version changes.
+/// Always deletes the existing plugin and re-extracts on every launch.
 /// </summary>
 internal static class BundleExtractor
 {
     private const string ResourceName = "plugin-bundle.zip";
-    private const string VersionFile = ".plugin-version";
 
     /// <summary>
-    /// Returns the cache directory path. Extracts the plugin DLL from
-    /// embedded resources if needed.
+    /// Returns the cache directory path. Always deletes and re-extracts the
+    /// plugin DLL from embedded resources to ensure it is never stale.
     /// </summary>
     public static string EnsureExtracted()
     {
@@ -22,23 +21,11 @@ internal static class BundleExtractor
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "JointVentures");
 
-        // Use InformationalVersion (includes +githash) so any new build triggers re-extraction
-        var asm = Assembly.GetExecutingAssembly();
-        var currentVersion =
-            asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
-            ?? asm.GetName().Version?.ToString()
-            ?? "dev";
-
-        var versionPath = Path.Combine(cacheDir, VersionFile);
         var pluginDir = Path.Combine(cacheDir, "BepInEx", "plugins", "COIJointVentures");
 
-        // Check if already extracted and up-to-date
-        if (File.Exists(Path.Combine(pluginDir, "COIJointVentures.dll"))
-            && File.Exists(versionPath)
-            && File.ReadAllText(versionPath).Trim() == currentVersion)
-        {
-            return cacheDir;
-        }
+        // Always remove the old plugin so it is never stale
+        if (Directory.Exists(pluginDir))
+            Directory.Delete(pluginDir, recursive: true);
 
         // Extract plugin
         Directory.CreateDirectory(pluginDir);
@@ -55,7 +42,6 @@ internal static class BundleExtractor
             entry.ExtractToFile(Path.Combine(pluginDir, entry.Name), overwrite: true);
         }
 
-        File.WriteAllText(versionPath, currentVersion);
         return cacheDir;
     }
 }
